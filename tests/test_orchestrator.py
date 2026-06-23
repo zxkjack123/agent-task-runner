@@ -259,10 +259,10 @@ def test_agent_command_opencode_uses_stdin_and_short_cli_instruction(monkeypatch
     assert "run" in cmd
     assert "--format" in cmd
     assert "json" in cmd
-    assert "-s" in cmd
+    assert "-s" not in cmd  # new session: no -s flag
     assert "stdin" in cmd[-1].lower()
     assert long_prompt not in " ".join(cmd)
-    assert isinstance(session_id, str) and session_id  # cold-start generates UUID
+    assert session_id is None  # cold-start: session ID captured from output
     assert stdin_text == long_prompt
 
 

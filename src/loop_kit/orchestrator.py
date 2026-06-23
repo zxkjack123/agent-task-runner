@@ -2329,22 +2329,22 @@ def _build_opencode_command(
     resume_session_id: str | None = None,
 ) -> tuple[list[str], str | None, str | None]:
     sid = SessionManager.normalize_session_id(resume_session_id) or ""
-    if not sid:
-        sid = str(uuid.uuid4())
     cmd = [
         exe,
         "run",
         "--format",
         "json",
-        "-s",
-        sid,
+    ]
+    if sid:
+        cmd.extend(["-s", sid])
+    cmd.append(
         (
             "Execute the context provided via stdin.  Follow the instructions"
             " embedded in it and only finish after the required output artifact"
             " is written."
         ),
-    ]
-    return (cmd, sid, prompt)
+    )
+    return (cmd, sid or None, prompt)
 
 
 def _opencode_parse_event(role: str, backend: str, line: str) -> str | None:
