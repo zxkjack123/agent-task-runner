@@ -17,13 +17,52 @@ from pathlib import Path
 import pytest
 
 from loop_kit import orchestrator
+from loop_kit.orchestrator import LoopPaths
+
+
+def _set_logs_dir(tmp_path: Path, logs_dir: Path | None = None) -> LoopPaths:
+    """Configure _stored_paths so that the logs dir points to the given path."""
+    resolved_logs = logs_dir if logs_dir is not None else tmp_path
+    loop_dir = tmp_path / ".loop"
+    context_dir = loop_dir / "context"
+    paths = LoopPaths(
+        root=tmp_path,
+        dir=loop_dir,
+        state=loop_dir / "state.json",
+        task_card=loop_dir / "task_card.json",
+        review_request=loop_dir / "review_request.json",
+        review_report=loop_dir / "review_report.json",
+        work_report=loop_dir / "work_report.json",
+        fix_list=loop_dir / "fix_list.json",
+        summary=loop_dir / "summary.json",
+        logs=resolved_logs,
+        archive=loop_dir / "archive",
+        lock=loop_dir / "lock",
+        config=loop_dir / "config.json",
+        tasks_dir=loop_dir / "tasks",
+        task_packet=loop_dir / "task_packet.json",
+        handoff_dir=loop_dir / "handoff",
+        context_dir=context_dir,
+        module_map_file=context_dir / "module_map.json",
+        project_facts=context_dir / "project_facts.md",
+        pitfalls=context_dir / "pitfalls.md",
+        patterns=context_dir / "patterns.jsonl",
+        knowledge_db=context_dir / "knowledge.sqlite3",
+        knowledge_lock=context_dir / "knowledge.lock",
+        state_backup=loop_dir / ".state.json.bak",
+        runtime_dir=loop_dir / "runtime",
+    )
+    orchestrator._stored_paths = paths
+    orchestrator._LOGS_DIR_ENSURED = False
+    orchestrator._LOGS_DIR_ENSURED_PATH = None
+    return paths
+
 
 
 @pytest.fixture(autouse=True)
 def _isolate_orchestrator_path_globals() -> None:
     original_root = orchestrator.ROOT
-    original_paths = orchestrator._snapshot_global_paths()
-    original_global_paths = orchestrator._global_paths
+    original_stored_paths = orchestrator._stored_paths
     original_feed_task_id = orchestrator._FEED_TASK_ID
     original_feed_round = orchestrator._FEED_ROUND
     original_feed_run_id = orchestrator._FEED_RUN_ID
@@ -32,8 +71,7 @@ def _isolate_orchestrator_path_globals() -> None:
     original_logs_ensured_path = orchestrator._LOGS_DIR_ENSURED_PATH
     yield
     orchestrator.ROOT = original_root
-    orchestrator._apply_loop_paths(original_paths)
-    orchestrator._global_paths = original_global_paths
+    orchestrator._stored_paths = original_stored_paths
     orchestrator._set_feed_task_id(original_feed_task_id)
     orchestrator._set_feed_round(original_feed_round)
     orchestrator._set_feed_run_id(original_feed_run_id)
@@ -316,24 +354,25 @@ def test_main_loop_dir_overrides_all_bus_paths(tmp_path: Path, monkeypatch) -> N
         dependency_map: bool = False,
         paths: orchestrator.LoopPaths | None = None,
     ) -> None:
-        _ = (tree, dependency_map, paths)
-        captured["loop_dir"] = orchestrator.LOOP_DIR
-        captured["logs_dir"] = orchestrator.LOGS_DIR
-        captured["runtime_dir"] = orchestrator.RUNTIME_DIR
-        captured["archive_dir"] = orchestrator.ARCHIVE_DIR
-        captured["context_dir"] = orchestrator._CONTEXT_DIR
-        captured["module_map_file"] = orchestrator._MODULE_MAP_FILE
-        captured["project_facts_file"] = orchestrator._PROJECT_FACTS_FILE
-        captured["pitfalls_file"] = orchestrator._PITFALLS_FILE
-        captured["patterns_file"] = orchestrator._PATTERNS_FILE
-        captured["state_file"] = orchestrator.STATE_FILE
-        captured["state_backup"] = orchestrator._STATE_BACKUP
-        captured["task_card"] = orchestrator.TASK_CARD
-        captured["fix_list"] = orchestrator.FIX_LIST
-        captured["work_report"] = orchestrator.WORK_REPORT
-        captured["review_req"] = orchestrator.REVIEW_REQ
-        captured["review_report"] = orchestrator.REVIEW_REPORT
-        captured["lock_file"] = orchestrator.LOCK_FILE
+        _ = (tree, dependency_map)
+        assert paths is not None
+        captured["loop_dir"] = paths.dir
+        captured["logs_dir"] = paths.logs
+        captured["runtime_dir"] = paths.runtime_dir
+        captured["archive_dir"] = paths.archive
+        captured["context_dir"] = paths.context_dir
+        captured["module_map_file"] = paths.module_map_file
+        captured["project_facts_file"] = paths.project_facts
+        captured["pitfalls_file"] = paths.pitfalls
+        captured["patterns_file"] = paths.patterns
+        captured["state_file"] = paths.state
+        captured["state_backup"] = paths.state_backup
+        captured["task_card"] = paths.task_card
+        captured["fix_list"] = paths.fix_list
+        captured["work_report"] = paths.work_report
+        captured["review_req"] = paths.review_request
+        captured["review_report"] = paths.review_report
+        captured["lock_file"] = paths.lock
 
     monkeypatch.setattr(orchestrator, "cmd_status", fake_status)
     monkeypatch.setattr(sys, "argv", ["orchestrator.py", "status", "--loop-dir", "my-loop"])
@@ -413,7 +452,8 @@ def test_main_status_dependency_map_flag_dispatches_to_cmd_status(monkeypatch) -
 def test_main_index_dispatches_to_cmd_index(monkeypatch) -> None:
     called = {"index": False}
 
-    def fake_cmd_index() -> None:
+    def fake_cmd_index(paths: orchestrator.LoopPaths | None = None) -> None:
+        _ = paths
         called["index"] = True
 
     monkeypatch.setattr(orchestrator, "cmd_index", fake_cmd_index)
@@ -452,6 +492,7 @@ def test_register_backend_allows_custom_backend_in_run_cli(monkeypatch) -> None:
         round_num: int | None,
         resume: bool = False,
         reset: bool = False,
+        paths: orchestrator.LoopPaths | None = None,
     ) -> None:
         _ = (single_round, round_num, resume, reset)
         captured["worker_backend"] = config.worker_backend
@@ -850,7 +891,7 @@ def test_run_auto_dispatch_dispatch_log_keeps_full_stdout_when_non_verbose(tmp_p
         "plain status line\n",
         '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}\n',
     ]
-    monkeypatch.setattr(orchestrator, "LOGS_DIR", tmp_path)
+    resolved_paths = _set_logs_dir(tmp_path)
     monkeypatch.setattr(
         orchestrator,
         "_agent_command",
@@ -864,10 +905,10 @@ def test_run_auto_dispatch_dispatch_log_keeps_full_stdout_when_non_verbose(tmp_p
         lambda cmd, **kwargs: _FakeProc(stdout_lines=raw_lines),
     )
 
-    orchestrator._run_auto_dispatch("worker", "codex", "ignored", 30, verbose=False)
+    orchestrator._run_auto_dispatch("worker", "codex", "ignored", 30, verbose=False, paths=resolved_paths)
 
     _ = capsys.readouterr()
-    dispatch_log = (tmp_path / "worker_dispatch.log").read_text(encoding="utf-8")
+    dispatch_log = (resolved_paths.logs / "worker_dispatch.log").read_text(encoding="utf-8")
     assert raw_lines[0].strip() in dispatch_log
     assert raw_lines[1].strip() in dispatch_log
 
@@ -1220,7 +1261,7 @@ def test_auto_dispatch_role_only_enables_heartbeat_when_required(monkeypatch) ->
     monkeypatch.setattr(orchestrator, "_run_auto_dispatch", fake_run_auto_dispatch)
     monkeypatch.setattr(orchestrator, "_dispatch_with_artifact_fallback", fake_dispatch_with_artifact_fallback)
     monkeypatch.setattr(
-        orchestrator, "_load_state", lambda: {"state": "idle", "round": 0, "task_id": None, "sessions": {}}
+        orchestrator, "_load_state", lambda paths=None: {"state": "idle", "round": 0, "task_id": None, "sessions": {}}
     )
     monkeypatch.setattr(orchestrator, "_save_state", lambda state: None)
 
@@ -2692,7 +2733,7 @@ def test_read_text_with_default_uses_packaged_default_when_project_file_missing(
 
 
 def test_log_writes_jsonl_feed_entry(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(orchestrator, "LOGS_DIR", tmp_path)
+    _set_logs_dir(tmp_path)
     orchestrator._set_feed_task_id("T-700")
     orchestrator._set_feed_round(3)
 
@@ -3368,7 +3409,7 @@ def test_configure_loop_paths_resets_log_dir_ensure_flag(tmp_path: Path, monkeyp
 
 
 def test_feed_event_routes_task_mismatch_with_tag_policy(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(orchestrator, "LOGS_DIR", tmp_path)
+    _set_logs_dir(tmp_path)
     orchestrator._set_feed_task_id("T-777")
     orchestrator._set_feed_task_route_policy(orchestrator.FEED_TASK_ROUTE_POLICY_TAG)
 
@@ -3400,7 +3441,7 @@ def test_feed_event_routes_task_mismatch_with_tag_policy(tmp_path: Path, monkeyp
 
 
 def test_feed_event_quarantines_task_mismatch_when_policy_requests_it(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(orchestrator, "LOGS_DIR", tmp_path)
+    _set_logs_dir(tmp_path)
     orchestrator._set_feed_task_id("T-777")
     orchestrator._set_feed_task_route_policy(orchestrator.FEED_TASK_ROUTE_POLICY_QUARANTINE)
 
@@ -3434,7 +3475,7 @@ def test_feed_event_quarantines_task_mismatch_when_policy_requests_it(tmp_path: 
 
 
 def test_feed_event_preserves_lane_attribution_across_cross_task_streams(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(orchestrator, "LOGS_DIR", tmp_path)
+    _set_logs_dir(tmp_path)
     orchestrator._set_feed_task_id("T-main")
     orchestrator._set_feed_task_route_policy(orchestrator.FEED_TASK_ROUTE_POLICY_TAG)
 
@@ -3468,6 +3509,7 @@ def test_main_run_parses_artifact_timeout(monkeypatch) -> None:
         round_num: int | None,
         resume: bool = False,
         reset: bool = False,
+        paths: orchestrator.LoopPaths | None = None,
     ) -> None:
         _ = reset
         captured["artifact_timeout"] = config.artifact_timeout
@@ -3510,11 +3552,12 @@ def test_main_run_dispatch_timeout_defaults_to_unlimited(monkeypatch) -> None:
         round_num: int | None,
         resume: bool = False,
         reset: bool = False,
+        paths: orchestrator.LoopPaths | None = None,
     ) -> None:
         _ = (single_round, round_num, resume, reset)
         captured["dispatch_timeout"] = config.dispatch_timeout
 
-    monkeypatch.setattr(orchestrator, "_load_config", lambda: {})
+    monkeypatch.setattr(orchestrator, "_load_config", lambda paths=None: {})
     monkeypatch.setattr(orchestrator, "cmd_run", fake_cmd_run)
     monkeypatch.setattr(sys, "argv", ["orchestrator.py", "run"])
 
@@ -3533,6 +3576,7 @@ def test_main_run_parses_dispatch_timeout(monkeypatch) -> None:
         round_num: int | None,
         resume: bool = False,
         reset: bool = False,
+        paths: orchestrator.LoopPaths | None = None,
     ) -> None:
         _ = (single_round, round_num, resume, reset)
         captured["dispatch_timeout"] = config.dispatch_timeout
@@ -3563,6 +3607,7 @@ def test_main_run_parses_dispatch_retry_flags(monkeypatch) -> None:
         round_num: int | None,
         resume: bool = False,
         reset: bool = False,
+        paths: orchestrator.LoopPaths | None = None,
     ) -> None:
         _ = (single_round, round_num, resume, reset)
         captured["dispatch_retries"] = config.dispatch_retries
@@ -3597,6 +3642,7 @@ def test_main_run_parses_worker_noop_flags(monkeypatch) -> None:
         round_num: int | None,
         resume: bool = False,
         reset: bool = False,
+        paths: orchestrator.LoopPaths | None = None,
     ) -> None:
         _ = (single_round, round_num, resume, reset)
         captured["worker_noop_as_error"] = config.worker_noop_as_error
@@ -3644,6 +3690,7 @@ def test_main_run_parses_max_session_rounds(monkeypatch) -> None:
         round_num: int | None,
         resume: bool = False,
         reset: bool = False,
+        paths: orchestrator.LoopPaths | None = None,
     ) -> None:
         _ = (single_round, round_num, resume, reset)
         captured["max_session_rounds"] = config.max_session_rounds
@@ -3709,7 +3756,7 @@ def _configure_default_knowledge_paths(monkeypatch, tmp_path: Path) -> tuple[Pat
     monkeypatch.setattr(
         orchestrator,
         "_configure_loop_paths",
-        lambda loop_dir=".loop": orchestrator._snapshot_global_paths(),
+        lambda loop_dir=".loop": orchestrator._resolve_paths(),
     )
     return facts_path, pitfalls_path, patterns_path
 
@@ -4293,7 +4340,7 @@ def test_cmd_run_exits_4_on_dirty_worktree(monkeypatch, capsys) -> None:
         def release(self) -> None:
             return None
 
-    monkeypatch.setattr(orchestrator, "_acquire_run_lock", lambda: _NoopLock())
+    monkeypatch.setattr(orchestrator, "_acquire_run_lock", lambda paths=None: _NoopLock())
 
     with pytest.raises(SystemExit) as exc:
         orchestrator.cmd_run(
@@ -7578,7 +7625,7 @@ def test_cmd_run_exits_5_when_run_lock_is_unavailable(monkeypatch, capsys) -> No
     monkeypatch.setattr(
         orchestrator,
         "_acquire_run_lock",
-        lambda: (_ for _ in ()).throw(RuntimeError("another orchestrator instance is already running")),
+        lambda paths=None: (_ for _ in ()).throw(RuntimeError("another orchestrator instance is already running")),
     )
 
     with pytest.raises(SystemExit) as exc:
@@ -7970,7 +8017,7 @@ class TestDispatchFailureHint:
 
 class TestWriteDispatchLog:
     def test_writes_structured_log(self, tmp_path: Path, monkeypatch) -> None:
-        monkeypatch.setattr(orchestrator, "LOGS_DIR", tmp_path)
+        _set_logs_dir(tmp_path)
         result = subprocess.CompletedProcess(args=["codex"], returncode=0, stdout="out\n", stderr="err\n")
         result.stdout = "out\n"
         result.stderr = "err\n"
@@ -7984,7 +8031,7 @@ class TestWriteDispatchLog:
         assert "stderr:" in log
 
     def test_no_session_id_omits_line(self, tmp_path: Path, monkeypatch) -> None:
-        monkeypatch.setattr(orchestrator, "LOGS_DIR", tmp_path)
+        _set_logs_dir(tmp_path)
         result = subprocess.CompletedProcess(args=["codex"], returncode=1, stdout="", stderr="")
         result.stdout = ""
         result.stderr = ""
@@ -7993,7 +8040,7 @@ class TestWriteDispatchLog:
         assert "session_id=" not in log
 
     def test_redacts_sensitive_values_in_stdout_and_stderr(self, tmp_path: Path, monkeypatch) -> None:
-        monkeypatch.setattr(orchestrator, "LOGS_DIR", tmp_path)
+        _set_logs_dir(tmp_path)
         result = subprocess.CompletedProcess(
             args=["codex"],
             returncode=1,
@@ -9333,15 +9380,17 @@ class TestLaneWorktreeLifecycle:
 
 class TestFailWithState:
     def test_exits_with_given_code(self, monkeypatch, tmp_path) -> None:
-        monkeypatch.setattr(orchestrator, "STATE_FILE", tmp_path / "state.json")
+        monkeypatch.setattr(orchestrator, "ROOT", tmp_path)
+        orchestrator._configure_loop_paths(tmp_path / ".loop")
         state = {"state": "idle"}
         with pytest.raises(SystemExit) as exc:
             orchestrator._fail_with_state(state, outcome="test_fail", message="boom", exit_code=42)
         assert exc.value.code == 42
 
     def test_saves_state(self, monkeypatch, tmp_path) -> None:
-        state_file = tmp_path / "state.json"
-        monkeypatch.setattr(orchestrator, "STATE_FILE", state_file)
+        monkeypatch.setattr(orchestrator, "ROOT", tmp_path)
+        resolved_paths = orchestrator._configure_loop_paths(tmp_path / ".loop")
+        state_file = resolved_paths.state
         state = {"state": "idle", "round": 1}
         with pytest.raises(SystemExit):
             orchestrator._fail_with_state(state, outcome="test_fail", message="boom")
@@ -9837,6 +9886,7 @@ class TestAutoDispatchConfig:
             round_num: int | None,
             resume: bool = False,
             reset: bool = False,
+            paths: orchestrator.LoopPaths | None = None,
         ) -> None:
             _ = (single_round, round_num, resume, reset)
             captured["auto_dispatch"] = config.auto_dispatch
@@ -9867,6 +9917,7 @@ class TestAutoDispatchConfig:
             round_num: int | None,
             resume: bool = False,
             reset: bool = False,
+            paths: orchestrator.LoopPaths | None = None,
         ) -> None:
             _ = (single_round, round_num, resume, reset)
             captured["auto_dispatch"] = config.auto_dispatch
@@ -9894,6 +9945,7 @@ class TestAutoDispatchConfig:
             round_num: int | None,
             resume: bool = False,
             reset: bool = False,
+            paths: orchestrator.LoopPaths | None = None,
         ) -> None:
             _ = (single_round, round_num, resume, reset)
             captured["auto_dispatch"] = config.auto_dispatch
@@ -9985,6 +10037,7 @@ class TestConfigLoadingPrecedence:
             round_num: int | None,
             resume: bool = False,
             reset: bool = False,
+            paths: orchestrator.LoopPaths | None = None,
         ) -> None:
             _ = (single_round, round_num, resume, reset)
             captured["max_rounds"] = config.max_rounds
@@ -10016,6 +10069,7 @@ class TestConfigLoadingPrecedence:
             round_num: int | None,
             resume: bool = False,
             reset: bool = False,
+            paths: orchestrator.LoopPaths | None = None,
         ) -> None:
             _ = (single_round, round_num, resume, reset)
             captured["max_rounds"] = config.max_rounds
@@ -10113,6 +10167,7 @@ class TestResetDefault:
             round_num: int | None,
             resume: bool = False,
             reset: bool = False,
+            paths: orchestrator.LoopPaths | None = None,
         ) -> None:
             _ = (config, single_round, round_num, resume)
             captured["reset"] = reset
@@ -10140,6 +10195,7 @@ class TestResetDefault:
             round_num: int | None,
             resume: bool = False,
             reset: bool = False,
+            paths: orchestrator.LoopPaths | None = None,
         ) -> None:
             _ = (config, single_round, round_num, resume)
             captured["reset"] = reset
@@ -11728,7 +11784,7 @@ class TestKnowledgeLayer:
         monkeypatch.setattr(
             orchestrator,
             "_update_knowledge_on_approval",
-            lambda task_id, round_num, *, run_id=None: calls.append((task_id, round_num)),
+            lambda task_id, round_num, *, run_id=None, paths=None: calls.append((task_id, round_num)),
         )
 
         orchestrator.cmd_run(
@@ -11798,7 +11854,7 @@ class TestKnowledgeLayer:
         monkeypatch.setattr(
             orchestrator,
             "_update_knowledge_on_approval",
-            lambda task_id, round_num, *, run_id=None: calls.append((task_id, round_num)),
+            lambda task_id, round_num, *, run_id=None, paths=None: calls.append((task_id, round_num)),
         )
 
         orchestrator.cmd_run(
@@ -11887,8 +11943,7 @@ def test_path_helpers_use_explicit_paths_instead_of_global_path_constants(tmp_pa
     _configure_loop_paths(monkeypatch, tmp_path)
     explicit_paths = orchestrator._build_loop_paths(tmp_path / ".loop-explicit")
 
-    monkeypatch.setattr(orchestrator, "LOGS_DIR", tmp_path / ".loop-global-logs")
-    monkeypatch.setattr(orchestrator, "_HANDOFF_DIR", tmp_path / ".loop-global-handoff")
+    _set_logs_dir(tmp_path, logs_dir=tmp_path / ".loop-global-logs")
 
     assert orchestrator._dispatch_log_path("worker", paths=explicit_paths) == explicit_paths.logs / "worker_dispatch.log"
     assert orchestrator._feed_log_path(paths=explicit_paths) == explicit_paths.logs / "feed.jsonl"

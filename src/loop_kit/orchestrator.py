@@ -313,12 +313,7 @@ class DirtyWorktreeError(ValidationError):
 
 
 ROOT = Path.cwd()
-LOOP_DIR = ROOT / ".loop"
-LOGS_DIR = LOOP_DIR / "logs"
-RUNTIME_DIR = LOOP_DIR / "runtime"
-ARCHIVE_DIR = LOOP_DIR / "archive"
-STATE_FILE = LOOP_DIR / "state.json"
-_STATE_BACKUP = LOOP_DIR / ".state.json.bak"
+_LOOP_DIR = ROOT / ".loop"
 
 DEFAULT_MAX_ROUNDS = 3
 POLL_INTERVAL_SEC = 1
@@ -490,6 +485,20 @@ class LoopPaths:
     summary: Path
     logs: Path
     archive: Path
+    lock: Path = Path()
+    config: Path = Path()
+    tasks_dir: Path = Path()
+    task_packet: Path = Path()
+    handoff_dir: Path = Path()
+    context_dir: Path = Path()
+    module_map_file: Path = Path()
+    project_facts: Path = Path()
+    pitfalls: Path = Path()
+    patterns: Path = Path()
+    knowledge_db: Path = Path()
+    knowledge_lock: Path = Path()
+    state_backup: Path = Path()
+    runtime_dir: Path = Path()
 
 
 @dataclass(frozen=True, slots=True)
@@ -501,54 +510,12 @@ class LaneWorktreeHandle:
     branch: str
 
 
-# Backward compatibility bridge while path globals are migrated function-by-function.
-_global_paths: LoopPaths | None = None
-
-
 # ── file paths ──────────────────────────────────────────────────────
-def _path(name: str) -> Path:
-    return LOOP_DIR / name
-
-
-TASK_CARD = _path("task_card.json")
-FIX_LIST = _path("fix_list.json")
-WORK_REPORT = _path("work_report.json")
-REVIEW_REQ = _path("review_request.json")
-REVIEW_REPORT = _path("review_report.json")
-LOCK_FILE = _path("lock")
-_SUMMARY_FILE = _path("summary.json")
-_CONFIG_FILE = _path("config.json")
-_TASKS_DIR = LOOP_DIR / "tasks"
-TASK_PACKET = _path("task_packet.json")
-_HANDOFF_DIR = LOOP_DIR / "handoff"
-_CONTEXT_DIR = LOOP_DIR / "context"
-_MODULE_MAP_FILE = _CONTEXT_DIR / "module_map.json"
-_PROJECT_FACTS_FILE = _CONTEXT_DIR / "project_facts.md"
-_PITFALLS_FILE = _CONTEXT_DIR / "pitfalls.md"
-_PATTERNS_FILE = _CONTEXT_DIR / "patterns.jsonl"
-_KNOWLEDGE_DB_FILE = _CONTEXT_DIR / "knowledge.sqlite3"
-_KNOWLEDGE_WRITE_LOCK_FILE = _CONTEXT_DIR / "knowledge.lock"
-_DEFAULTS_DIR = Path(__file__).resolve().parent / "defaults"
-_DEFAULT_FACTS_JSONL = _DEFAULTS_DIR / "facts.jsonl"
-_DEFAULT_PITFALLS_JSONL = _DEFAULTS_DIR / "pitfalls.jsonl"
-_DEFAULT_PATTERNS_JSONL = _DEFAULTS_DIR / "patterns.jsonl"
-_RESETTABLE_FILES = [
-    LOCK_FILE,
-    STATE_FILE,
-    _STATE_BACKUP,
-    _SUMMARY_FILE,
-    WORK_REPORT,
-    REVIEW_REPORT,
-    REVIEW_REQ,
-    FIX_LIST,
-    TASK_CARD,
-    TASK_PACKET,
-]
 
 
 @dataclass(slots=True)
 class RunConfig:
-    task_path: str = field(default_factory=lambda: str(TASK_CARD))
+    task_path: str = field(default_factory=lambda: str(_resolve_paths().task_card))
     max_rounds: int = DEFAULT_MAX_ROUNDS
     timeout: int = 0
     require_heartbeat: bool = False
@@ -595,6 +562,7 @@ def _resolve_loop_dir(loop_dir: str | Path) -> Path:
 
 def _build_loop_paths(loop_dir: Path) -> LoopPaths:
     resolved_dir = _resolve_loop_dir(loop_dir)
+    context_dir = resolved_dir / "context"
     return LoopPaths(
         root=ROOT,
         dir=resolved_dir,
@@ -607,120 +575,106 @@ def _build_loop_paths(loop_dir: Path) -> LoopPaths:
         summary=resolved_dir / "summary.json",
         logs=resolved_dir / "logs",
         archive=resolved_dir / "archive",
+        lock=resolved_dir / "lock",
+        config=resolved_dir / "config.json",
+        tasks_dir=resolved_dir / "tasks",
+        task_packet=resolved_dir / "task_packet.json",
+        handoff_dir=resolved_dir / "handoff",
+        context_dir=context_dir,
+        module_map_file=context_dir / "module_map.json",
+        project_facts=context_dir / "project_facts.md",
+        pitfalls=context_dir / "pitfalls.md",
+        patterns=context_dir / "patterns.jsonl",
+        knowledge_db=context_dir / "knowledge.sqlite3",
+        knowledge_lock=context_dir / "knowledge.lock",
+        state_backup=resolved_dir / ".state.json.bak",
+        runtime_dir=resolved_dir / "runtime",
     )
 
 
-def _snapshot_global_paths() -> LoopPaths:
-    return LoopPaths(
-        root=ROOT,
-        dir=LOOP_DIR,
-        state=STATE_FILE,
-        task_card=TASK_CARD,
-        review_request=REVIEW_REQ,
-        review_report=REVIEW_REPORT,
-        work_report=WORK_REPORT,
-        fix_list=FIX_LIST,
-        summary=LOOP_DIR / "summary.json",
-        logs=LOGS_DIR,
-        archive=ARCHIVE_DIR,
-    )
-
-
-def _paths_match_globals(paths: LoopPaths) -> bool:
-    current = _snapshot_global_paths()
-    return (
-        paths.root == current.root
-        and paths.dir == current.dir
-        and paths.state == current.state
-        and paths.task_card == current.task_card
-        and paths.review_request == current.review_request
-        and paths.review_report == current.review_report
-        and paths.work_report == current.work_report
-        and paths.fix_list == current.fix_list
-        and paths.summary == current.summary
-        and paths.logs == current.logs
-        and paths.archive == current.archive
-    )
+_stored_paths: LoopPaths | None = None
 
 
 def _resolve_paths(paths: LoopPaths | None = None) -> LoopPaths:
-    # TODO(paths): _render_fix_list_section/_render_task_packet_section/_resolve_task_path
-    # still consume module globals; keep them synchronized via _global_paths during migration.
     if paths is not None:
         return paths
-    if _global_paths is not None and _paths_match_globals(_global_paths):
-        return _global_paths
-    return _snapshot_global_paths()
-
-
-def _apply_loop_paths(paths: LoopPaths) -> None:
-    global LOOP_DIR
-    global LOGS_DIR
-    global RUNTIME_DIR
-    global ARCHIVE_DIR
-    global STATE_FILE
-    global _STATE_BACKUP
-    global TASK_CARD
-    global FIX_LIST
-    global WORK_REPORT
-    global REVIEW_REQ
-    global REVIEW_REPORT
-    global LOCK_FILE
-    global _SUMMARY_FILE
-    global _CONFIG_FILE
-    global _TASKS_DIR
-    global _HANDOFF_DIR
-    global _LOGS_DIR_ENSURED
-    global _LOGS_DIR_ENSURED_PATH
-    global TASK_PACKET
-    global _CONTEXT_DIR
-    global _MODULE_MAP_FILE
-    global _PROJECT_FACTS_FILE
-    global _PITFALLS_FILE
-    global _PATTERNS_FILE
-    global _KNOWLEDGE_DB_FILE
-    global _KNOWLEDGE_WRITE_LOCK_FILE
-    global _FEED_ROUND
-    global _FEED_RUN_ID
-    global _FEED_TASK_ROUTE_POLICY
-
-    LOOP_DIR = paths.dir
-    LOGS_DIR = paths.logs
-    RUNTIME_DIR = paths.dir / "runtime"
-    ARCHIVE_DIR = paths.archive
-    STATE_FILE = paths.state
-    _STATE_BACKUP = paths.dir / ".state.json.bak"
-    TASK_CARD = paths.task_card
-    FIX_LIST = paths.fix_list
-    WORK_REPORT = paths.work_report
-    REVIEW_REQ = paths.review_request
-    REVIEW_REPORT = paths.review_report
-    LOCK_FILE = paths.dir / "lock"
-    _SUMMARY_FILE = paths.summary
-    _CONFIG_FILE = paths.dir / "config.json"
-    _TASKS_DIR = paths.dir / "tasks"
-    TASK_PACKET = paths.dir / "task_packet.json"
-    _HANDOFF_DIR = paths.dir / "handoff"
-    _CONTEXT_DIR = paths.dir / "context"
-    _MODULE_MAP_FILE = _CONTEXT_DIR / "module_map.json"
-    _PROJECT_FACTS_FILE = _CONTEXT_DIR / "project_facts.md"
-    _PITFALLS_FILE = _CONTEXT_DIR / "pitfalls.md"
-    _PATTERNS_FILE = _CONTEXT_DIR / "patterns.jsonl"
-    _KNOWLEDGE_DB_FILE = _CONTEXT_DIR / "knowledge.sqlite3"
-    _KNOWLEDGE_WRITE_LOCK_FILE = _CONTEXT_DIR / "knowledge.lock"
-    _LOGS_DIR_ENSURED = False
-    _LOGS_DIR_ENSURED_PATH = None
-    _FEED_ROUND = None
-    _FEED_RUN_ID = None
-    _FEED_TASK_ROUTE_POLICY = _DEFAULT_FEED_TASK_ROUTE_POLICY
+    if _stored_paths is not None:
+        return _stored_paths
+    return _build_loop_paths(_LOOP_DIR)
 
 
 def _configure_loop_paths(loop_dir: str | Path = ".loop") -> LoopPaths:
-    global _global_paths
+    global _stored_paths, _LOGS_DIR_ENSURED, _LOGS_DIR_ENSURED_PATH
     paths = _build_loop_paths(Path(loop_dir))
-    _global_paths = paths
-    _apply_loop_paths(paths)
+    _stored_paths = paths
+    _LOGS_DIR_ENSURED = False
+    _LOGS_DIR_ENSURED_PATH = None
     return paths
+
+
+# Module-level path constants retained as initial defaults for LoopPaths construction.
+# They are NOT referenced in any function body — all runtime access goes through _resolve_paths().
+# Backward-compatible aliases for tests/external callers that access path globals directly.
+# These are resolved lazily via __getattr__ below.
+_DEFAULTS_DIR = Path(__file__).resolve().parent / "defaults"
+_DEFAULT_FACTS_JSONL = _DEFAULTS_DIR / "facts.jsonl"
+_DEFAULT_PITFALLS_JSONL = _DEFAULTS_DIR / "pitfalls.jsonl"
+_DEFAULT_PATTERNS_JSONL = _DEFAULTS_DIR / "patterns.jsonl"
+
+# Map of old global name -> LoopPaths attribute name for backward-compatible access.
+_PATH_GLOBAL_ALIASES: dict[str, str] = {
+    "LOOP_DIR": "dir",
+    "LOGS_DIR": "logs",
+    "RUNTIME_DIR": "runtime_dir",
+    "ARCHIVE_DIR": "archive",
+    "STATE_FILE": "state",
+    "_STATE_BACKUP": "state_backup",
+    "TASK_CARD": "task_card",
+    "FIX_LIST": "fix_list",
+    "WORK_REPORT": "work_report",
+    "REVIEW_REQ": "review_request",
+    "REVIEW_REPORT": "review_report",
+    "LOCK_FILE": "lock",
+    "_SUMMARY_FILE": "summary",
+    "_CONFIG_FILE": "config",
+    "_TASKS_DIR": "tasks_dir",
+    "TASK_PACKET": "task_packet",
+    "_HANDOFF_DIR": "handoff_dir",
+    "_CONTEXT_DIR": "context_dir",
+    "_MODULE_MAP_FILE": "module_map_file",
+    "_PROJECT_FACTS_FILE": "project_facts",
+    "_PITFALLS_FILE": "pitfalls",
+    "_PATTERNS_FILE": "patterns",
+    "_KNOWLEDGE_DB_FILE": "knowledge_db",
+    "_KNOWLEDGE_WRITE_LOCK_FILE": "knowledge_lock",
+}
+
+
+def __getattr__(name: str) -> object:
+    """Provide backward-compatible access to removed path globals via _resolve_paths()."""
+    attr = _PATH_GLOBAL_ALIASES.get(name)
+    if attr is not None:
+        return getattr(_resolve_paths(), attr)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def _resettable_files(paths: LoopPaths | None = None) -> list[Path]:
+    resolved = _resolve_paths(paths)
+    return [
+        resolved.lock,
+        resolved.state,
+        resolved.state_backup,
+        resolved.summary,
+        resolved.work_report,
+        resolved.review_report,
+        resolved.review_request,
+        resolved.fix_list,
+        resolved.task_card,
+        resolved.task_packet,
+    ]
+
+
+_RESETTABLE_FILES = _resettable_files()
 
 
 def _loop_templates_dir(paths: LoopPaths | None = None) -> Path:
@@ -764,6 +718,7 @@ def _critical_dependency_map_diagnostics() -> CriticalDependencyDiagnostics:
         for section, spec in _CRITICAL_DEPENDENCY_MAP.items()
     }
     known_symbols = globals()
+    known_symbols = {**known_symbols, **dict.fromkeys(_PATH_GLOBAL_ALIASES)}
     missing_symbols: dict[str, list[str]] = {}
     for section in _CRITICAL_DEPENDENCY_SECTION_ORDER:
         spec = sections[section]
@@ -1079,14 +1034,16 @@ class _LoopLock:
         self.release()
 
 
-def _acquire_run_lock() -> _LoopLock:
-    lock = _LoopLock(LOCK_FILE)
+def _acquire_run_lock(paths: LoopPaths | None = None) -> _LoopLock:
+    resolved_paths = _resolve_paths(paths)
+    lock = _LoopLock(resolved_paths.lock)
     lock.acquire()
     return lock
 
 
-def _heartbeat_path(role: str) -> Path:
-    return RUNTIME_DIR / f"{role}.heartbeat.json"
+def _heartbeat_path(role: str, paths: LoopPaths | None = None) -> Path:
+    resolved_paths = _resolve_paths(paths)
+    return resolved_paths.runtime_dir / f"{role}.heartbeat.json"
 
 
 def _dispatch_log_path(role: str, paths: LoopPaths | None = None) -> Path:
@@ -2391,9 +2348,11 @@ def _write_dispatch_log(
     cmd: list[str],
     result: subprocess.CompletedProcess[str],
     session_id: str | None,
+    paths: LoopPaths | None = None,
 ) -> None:
-    LOGS_DIR.mkdir(parents=True, exist_ok=True)
-    log = _dispatch_log_path(role)
+    resolved_paths = _resolve_paths(paths)
+    _ensure_logs_dir(paths=resolved_paths)
+    log = _dispatch_log_path(role, paths=resolved_paths)
     with open(log, "a", encoding="utf-8") as f:
         f.write(f"[{_ts()}] role={role} returncode={result.returncode}\n")
         if session_id:
@@ -2483,8 +2442,9 @@ def _report_dispatch_result(
     task_id: str | None = None,
     round_num: int | None = None,
     lane_id: str | None = None,
+    paths: LoopPaths | None = None,
 ) -> None:
-    _write_dispatch_log(role, cmd, result, session_id)
+    _write_dispatch_log(role, cmd, result, session_id, paths=paths)
     event_type = (
         FEED_DISPATCH_COMPLETE
         if timeout_sec is None and result.returncode == 0 and not interrupted
@@ -2803,6 +2763,7 @@ def _run_auto_dispatch(
     dispatch_started_at: float | None = None,
     telemetry: dict[str, object] | None = None,
     cwd: Path | None = None,
+    paths: LoopPaths | None = None,
 ) -> str | None:
     parse_event_fn = _require_registered_parse_event(backend)
     retry_count = max(0, int(dispatch_retries))
@@ -3020,6 +2981,7 @@ def _run_auto_dispatch(
                     task_id=task_id,
                     round_num=round_num,
                     lane_id=lane_id,
+                    paths=paths,
                 )
                 raise
             if first_meaningful_summary_ms is None:
@@ -3059,6 +3021,7 @@ def _run_auto_dispatch(
                     task_id=task_id,
                     round_num=round_num,
                     lane_id=lane_id,
+                    paths=paths,
                 )
                 raise DispatchTimeoutError(
                     f"{role} dispatch timeout after {timeout_sec}s (backend={backend})."
@@ -3097,6 +3060,7 @@ def _run_auto_dispatch(
                 task_id=task_id,
                 round_num=round_num,
                 lane_id=lane_id,
+                paths=paths,
             )
 
             if result.returncode == 0:
@@ -3355,12 +3319,14 @@ def _load_markdown_knowledge_entries(path: Path, *, field_name: str) -> list[dic
     return entries
 
 
-def _load_project_facts() -> list[dict[str, str]]:
-    return _load_markdown_knowledge_entries(_PROJECT_FACTS_FILE, field_name="fact")
+def _load_project_facts(paths: LoopPaths | None = None) -> list[dict[str, str]]:
+    resolved_paths = _resolve_paths(paths)
+    return _load_markdown_knowledge_entries(resolved_paths.project_facts, field_name="fact")
 
 
-def _load_pitfalls() -> list[dict[str, str]]:
-    return _load_markdown_knowledge_entries(_PITFALLS_FILE, field_name="pitfall")
+def _load_pitfalls(paths: LoopPaths | None = None) -> list[dict[str, str]]:
+    resolved_paths = _resolve_paths(paths)
+    return _load_markdown_knowledge_entries(resolved_paths.pitfalls, field_name="pitfall")
 
 
 def _read_markdown_knowledge_lines(path: Path) -> list[str]:
@@ -3461,24 +3427,26 @@ def _knowledge_meta_set(conn: sqlite3.Connection, key: str, value: str) -> None:
     )
 
 
-def _knowledge_db_cache_key() -> str:
+def _knowledge_db_cache_key(paths: LoopPaths | None = None) -> str:
+    db_path = _resolve_paths(paths).knowledge_db
     try:
-        return str(_KNOWLEDGE_DB_FILE.resolve())
+        return str(db_path.resolve())
     except OSError:
-        return str(_KNOWLEDGE_DB_FILE)
+        return str(db_path)
 
 
-def _set_knowledge_fts_cache(fts_available: bool) -> None:
-    _KNOWLEDGE_FTS_AVAILABLE_BY_PATH[_knowledge_db_cache_key()] = bool(fts_available)
+def _set_knowledge_fts_cache(fts_available: bool, paths: LoopPaths | None = None) -> None:
+    _KNOWLEDGE_FTS_AVAILABLE_BY_PATH[_knowledge_db_cache_key(paths)] = bool(fts_available)
 
 
-def _get_knowledge_fts_cache() -> bool | None:
-    return _KNOWLEDGE_FTS_AVAILABLE_BY_PATH.get(_knowledge_db_cache_key())
+def _get_knowledge_fts_cache(paths: LoopPaths | None = None) -> bool | None:
+    return _KNOWLEDGE_FTS_AVAILABLE_BY_PATH.get(_knowledge_db_cache_key(paths))
 
 
-def _connect_knowledge_db() -> sqlite3.Connection:
-    _KNOWLEDGE_DB_FILE.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(_KNOWLEDGE_DB_FILE)
+def _connect_knowledge_db(paths: LoopPaths | None = None) -> sqlite3.Connection:
+    db_path = _resolve_paths(paths).knowledge_db
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
@@ -3921,10 +3889,10 @@ def _iter_task_card_query_fragments(task_card: TaskCard | None) -> list[str]:
     return fragments
 
 
-def _iter_fix_list_query_fragments(round_num: int) -> list[str]:
+def _iter_fix_list_query_fragments(round_num: int, paths: LoopPaths | None = None) -> list[str]:
     if round_num <= 1:
         return []
-    fix_data = _read_json_if_exists(FIX_LIST)
+    fix_data = _read_json_if_exists(_resolve_paths(paths).fix_list)
     if not isinstance(fix_data, dict):
         return []
     fixes = fix_data.get("fixes")
@@ -4088,9 +4056,10 @@ def _normalize_pattern_entry(
     return normalized, changed, stale
 
 
-def _write_patterns_jsonl(entries: list[dict]) -> None:
+def _write_patterns_jsonl(entries: list[dict], paths: LoopPaths | None = None) -> None:
+    resolved_paths = _resolve_paths(paths)
     normalized_entries = [{k: v for k, v in item.items() if k != "source_version"} for item in entries]
-    _atomic_write_jsonl(_PATTERNS_FILE, normalized_entries)
+    _atomic_write_jsonl(resolved_paths.patterns, normalized_entries)
 
 
 def _read_jsonl_entries(path: Path) -> list[dict]:
@@ -4749,11 +4718,12 @@ def cmd_knowledge_benchmark(query: str, iterations: int) -> None:
     print(f"  millisecond_class={millisecond_class}")
 
 
-def _load_patterns_with_governance(*, persist: bool = False) -> tuple[list[dict], int]:
-    text = _read_text_optional(_PATTERNS_FILE)
+def _load_patterns_with_governance(*, persist: bool = False, paths: LoopPaths | None = None) -> tuple[list[dict], int]:
+    resolved_paths = _resolve_paths(paths)
+    text = _read_text_optional(resolved_paths.patterns)
     if not text:
         return [], 0
-    source_version = _source_version_from_file(_PATTERNS_FILE)
+    source_version = _source_version_from_file(resolved_paths.patterns)
     now_utc = datetime.now(UTC)
     deduped: dict[tuple[str, str], tuple[dict, bool]] = {}
     duplicate_count = 0
@@ -4802,8 +4772,8 @@ def _load_patterns_with_governance(*, persist: bool = False) -> tuple[list[dict]
     )
 
     if persist and changed:
-        _write_patterns_jsonl(entries)
-        persisted_source_version = _source_version_from_file(_PATTERNS_FILE)
+        _write_patterns_jsonl(entries, paths=resolved_paths)
+        persisted_source_version = _source_version_from_file(resolved_paths.patterns)
         for entry in entries:
             entry["source_version"] = persisted_source_version
     return entries, stale_count
@@ -4817,10 +4787,10 @@ def _format_pattern_prompt_line(entry: dict) -> str:
     return f"[{confidence:.2f}] ({category}) {pattern} (verified {last_verified})"
 
 
-def _render_knowledge_section(task_id: str, round_num: int, task_card: TaskCard | None) -> str:
-    project_fact_entries = _load_project_facts()
-    pitfall_entries = _load_pitfalls()
-    patterns, _ = _load_patterns_with_governance(persist=False)
+def _render_knowledge_section(task_id: str, round_num: int, task_card: TaskCard | None, paths: LoopPaths | None = None) -> str:
+    project_fact_entries = _load_project_facts(paths=paths)
+    pitfall_entries = _load_pitfalls(paths=paths)
+    patterns, _ = _load_patterns_with_governance(persist=False, paths=paths)
     query_fragments = _knowledge_query_fragments(task_id, round_num, task_card)
     query_tokens = _knowledge_query_tokens(task_id, round_num, task_card)
     selected_facts, selected_pitfalls, selected_patterns, _ = _retrieve_ranked_knowledge(
@@ -4859,7 +4829,7 @@ def _is_path_under_root(path: Path, root: Path) -> bool:
         return False
 
 
-def _build_task_packet(task_card: TaskCard, round_num: int) -> TaskPacket:
+def _build_task_packet(task_card: TaskCard, round_num: int, paths: LoopPaths | None = None) -> TaskPacket:
     in_scope = task_card.get("in_scope", [])
     target_files: list[str] = []
     seen_target_files: set[str] = set()
@@ -4939,10 +4909,10 @@ def _build_task_packet(task_card: TaskCard, round_num: int) -> TaskPacket:
     acceptance_criteria = task_card.get("acceptance_criteria", [])
     acceptance_checks: list[str] = [c for c in acceptance_criteria if isinstance(c, str)]
 
-    known_risks: list[str] = [entry["pitfall"] for entry in _load_pitfalls()]
+    known_risks: list[str] = [entry["pitfall"] for entry in _load_pitfalls(paths=paths)]
 
     if round_num > 1:
-        fix_list_data = _read_json_if_exists(FIX_LIST)
+        fix_list_data = _read_json_if_exists(_resolve_paths(paths).fix_list)
         if isinstance(fix_list_data, dict):
             fix_list = cast(FixList, fix_list_data)
             fixes = fix_list.get("fixes", [])
@@ -5237,11 +5207,12 @@ def _persist_reviewer_handoff(
     )
 
 
-def _render_prior_round_context_section(round_num: int) -> str | None:
+def _render_prior_round_context_section(round_num: int, paths: LoopPaths | None = None) -> str | None:
     if round_num <= 1:
         return None
-    work_data = _read_json_if_exists(WORK_REPORT)
-    review_data = _read_json_if_exists(REVIEW_REPORT)
+    resolved_paths = _resolve_paths(paths)
+    work_data = _read_json_if_exists(resolved_paths.work_report)
+    review_data = _read_json_if_exists(resolved_paths.review_report)
     if not isinstance(work_data, dict) or not isinstance(review_data, dict):
         return None
     work = cast(WorkReport, work_data)
@@ -5349,9 +5320,9 @@ def _read_text_with_default(project_path: Path, default_filename: str) -> str:
     )
 
 
-def _render_fix_list_section(round_num: int) -> str:
+def _render_fix_list_section(round_num: int, paths: LoopPaths | None = None) -> str:
     _ = round_num
-    fix_list_data = _read_json_if_exists(FIX_LIST)
+    fix_list_data = _read_json_if_exists(_resolve_paths(paths).fix_list)
     if not isinstance(fix_list_data, dict):
         return "- <none>"
     fix_list = cast(FixList, fix_list_data)
@@ -5369,8 +5340,8 @@ def _render_fix_list_section(round_num: int) -> str:
     return "\n".join(lines) if lines else "- <none>"
 
 
-def _render_task_packet_section() -> str:
-    packet_data = _read_json_if_exists(TASK_PACKET)
+def _render_task_packet_section(paths: LoopPaths | None = None) -> str:
+    packet_data = _read_json_if_exists(_resolve_paths(paths).task_packet)
     if not isinstance(packet_data, dict):
         return "- <none>"
     packet = cast(TaskPacket, packet_data)
@@ -5407,16 +5378,17 @@ def _join_prompt_sections(sections: list[tuple[str, str]]) -> str:
     return "\n\n".join(parts)
 
 
-def _build_prompt_sections(task_id: str, round_num: int) -> list[tuple[str, str]]:
+def _build_prompt_sections(task_id: str, round_num: int, paths: LoopPaths | None = None) -> list[tuple[str, str]]:
+    resolved_paths = _resolve_paths(paths)
     role_text = _read_text_with_default(
         ROOT / "docs" / "roles" / "code-writer.md",
         "code_writer_md_default.txt",
     )
-    task_packet_section = _render_task_packet_section()
-    task_card_data = _read_json_if_exists(TASK_CARD)
+    task_packet_section = _render_task_packet_section(paths=resolved_paths)
+    task_card_data = _read_json_if_exists(resolved_paths.task_card)
     task_card = cast(TaskCard, task_card_data) if isinstance(task_card_data, dict) else cast(TaskCard, {})
-    knowledge_section = _render_knowledge_section(task_id, round_num, task_card)
-    handoff_section = _render_handoff_context_section(task_id, round_num)
+    knowledge_section = _render_knowledge_section(task_id, round_num, task_card, paths=resolved_paths)
+    handoff_section = _render_handoff_context_section(task_id, round_num, paths=resolved_paths)
 
     sections: list[tuple[str, str]] = []
 
@@ -5428,7 +5400,7 @@ def _build_prompt_sections(task_id: str, round_num: int) -> list[tuple[str, str]
         orchestrator_path = ROOT / "src" / "loop_kit" / "orchestrator.py"
         task_card_section = _render_task_card_section(task_card)
         quickstart_section = _render_quickstart_context_section(task_card)
-        prior_context_section = _render_prior_round_context_section(round_num)
+        prior_context_section = _render_prior_round_context_section(round_num, paths=resolved_paths)
 
         sections = [
             ("=== BEGIN AGENTS.md ===", f"{agents_text}\n=== END AGENTS.md ==="),
@@ -5448,8 +5420,8 @@ def _build_prompt_sections(task_id: str, round_num: int) -> list[tuple[str, str]
             lines = prior_context_section.split("\n", 1)
             sections.append((lines[0], lines[1] if len(lines) > 1 else ""))
     else:
-        fix_list_section = _render_fix_list_section(round_num)
-        prior_context_section = _render_prior_round_context_section(round_num)
+        fix_list_section = _render_fix_list_section(round_num, paths=resolved_paths)
+        prior_context_section = _render_prior_round_context_section(round_num, paths=resolved_paths)
 
         sections = [
             ("=== BEGIN docs/roles/code-writer.md ===", f"{role_text}\n=== END docs/roles/code-writer.md ==="),
@@ -5490,18 +5462,18 @@ def _worker_prompt(
             "code_writer_md_default.txt",
         )
         orchestrator_path = ROOT / "src" / "loop_kit" / "orchestrator.py"
-        task_card_data = _read_json_if_exists(TASK_CARD)
+        task_card_data = _read_json_if_exists(resolved_paths.task_card)
         task_card = cast(TaskCard, task_card_data) if isinstance(task_card_data, dict) else cast(TaskCard, {})
         task_card_section = _render_task_card_section(task_card) if include_cold_start_context else ""
-        prior_context_section = _render_prior_round_context_section(round_num)
+        prior_context_section = _render_prior_round_context_section(round_num, paths=resolved_paths)
         quickstart_section = (
             _render_quickstart_context_section(task_card)
             if include_cold_start_context
             else "- warm session path; quickstart context is intentionally omitted"
         )
         handoff_section = _render_handoff_context_section(task_id, round_num, paths=resolved_paths)
-        knowledge_section = _render_knowledge_section(task_id, round_num, task_card)
-        task_packet_section = _render_task_packet_section()
+        knowledge_section = _render_knowledge_section(task_id, round_num, task_card, paths=resolved_paths)
+        task_packet_section = _render_task_packet_section(paths=resolved_paths)
         context = {
             "task_id": task_id,
             "round_num": str(round_num),
@@ -5532,9 +5504,9 @@ def _worker_prompt(
         f"Current task_id: {task_id}, round: {round_num}, run_id: {effective_run_id}.\n"
         f"Execute the contract below and only finish after writing {_display_path(resolved_paths.work_report)}."
     )
-    sections = _build_prompt_sections(task_id, round_num)
+    sections = _build_prompt_sections(task_id, round_num, paths=resolved_paths)
     result = header + "\n\n" + _join_prompt_sections(sections)
-    if round_num > 1 and not _render_prior_round_context_section(round_num):
+    if round_num > 1 and not _render_prior_round_context_section(round_num, paths=resolved_paths):
         result += "\n\n"
     return result
 
@@ -7510,17 +7482,18 @@ def _render_dependency_tree(snapshot: _TaskDependencySnapshot) -> list[str]:
     return lines
 
 
-def _load_config() -> dict:
+def _load_config(paths: LoopPaths | None = None) -> dict:
     """Load .loop/config defaults (config.yaml first, then config.json)."""
-    config_yaml = _CONFIG_FILE.with_name("config.yaml")
+    config_file = _resolve_paths(paths).config
+    config_yaml = config_file.with_name("config.yaml")
     if config_yaml.is_file():
         yaml_data = _load_config_from_yaml(config_yaml)
         if yaml_data:
             return yaml_data
-    if not _CONFIG_FILE.is_file():
+    if not config_file.is_file():
         return {}
     try:
-        data = _load_json_with_limit(_CONFIG_FILE, label=_CONFIG_FILE.name)
+        data = _load_json_with_limit(config_file, label=config_file.name)
         return data if isinstance(data, dict) else {}
     except ConfigError:
         raise
@@ -8085,8 +8058,8 @@ def _index_module_file(path: Path, rel_path: str, stat_result: os.stat_result) -
     }
 
 
-def _load_existing_module_map_entries() -> dict[str, dict]:
-    data = _read_json_if_exists(_MODULE_MAP_FILE)
+def _load_existing_module_map_entries(paths: LoopPaths | None = None) -> dict[str, dict]:
+    data = _read_json_if_exists(_resolve_paths(paths).module_map_file)
     if not isinstance(data, dict):
         return {}
     raw_files = data.get("files")
@@ -8137,10 +8110,11 @@ def _build_module_entry(path: Path, existing_entries: dict[str, dict]) -> dict |
     return _index_module_file(path, rel_path, stat_result)
 
 
-def cmd_index() -> None:
-    _CONTEXT_DIR.mkdir(parents=True, exist_ok=True)
+def cmd_index(paths: LoopPaths | None = None) -> None:
+    resolved_paths = _resolve_paths(paths)
+    resolved_paths.context_dir.mkdir(parents=True, exist_ok=True)
     source_dir = ROOT / "src" / "loop_kit"
-    existing_entries = _load_existing_module_map_entries()
+    existing_entries = _load_existing_module_map_entries(paths=resolved_paths)
 
     files: list[dict] = []
     for module_path in sorted(source_dir.rglob("*.py")):
@@ -8155,9 +8129,9 @@ def cmd_index() -> None:
         "generated_at": _ts(),
         "total_files": len(files),
     }
-    _atomic_write_json(_MODULE_MAP_FILE, payload)
-    _log(f"Module index updated: {_display_path(_MODULE_MAP_FILE)} ({len(files)} files)")
-    print(f"  Indexed: {len(files)} files -> {_display_path(_MODULE_MAP_FILE)}")
+    _atomic_write_json(resolved_paths.module_map_file, payload)
+    _log(f"Module index updated: {_display_path(resolved_paths.module_map_file)} ({len(files)} files)")
+    print(f"  Indexed: {len(files)} files -> {_display_path(resolved_paths.module_map_file)}")
 
 
 # ── init ────────────────────────────────────────────────────────────
@@ -8186,15 +8160,15 @@ def cmd_init(paths: LoopPaths | None = None) -> None:
     print(f"  Created: {handoff_dir}")
     print(f"  Created: {context_dir}")
     print(f"  Created: {templates_dir}")
-    if not _MODULE_MAP_FILE.exists():
-        _atomic_write_json(_MODULE_MAP_FILE, _empty_module_map())
-        print(f"  Created: {_MODULE_MAP_FILE}")
-    if _write_template_if_missing(_PROJECT_FACTS_FILE, _default_project_facts_content()):
-        print(f"  Created: {_PROJECT_FACTS_FILE}")
-    if _write_template_if_missing(_PITFALLS_FILE, _default_pitfalls_content()):
-        print(f"  Created: {_PITFALLS_FILE}")
-    if _write_template_if_missing(_PATTERNS_FILE, _default_patterns_content()):
-        print(f"  Created: {_PATTERNS_FILE}")
+    if not resolved_paths.module_map_file.exists():
+        _atomic_write_json(resolved_paths.module_map_file, _empty_module_map())
+        print(f"  Created: {resolved_paths.module_map_file}")
+    if _write_template_if_missing(resolved_paths.project_facts, _default_project_facts_content()):
+        print(f"  Created: {resolved_paths.project_facts}")
+    if _write_template_if_missing(resolved_paths.pitfalls, _default_pitfalls_content()):
+        print(f"  Created: {resolved_paths.pitfalls}")
+    if _write_template_if_missing(resolved_paths.patterns, _default_patterns_content()):
+        print(f"  Created: {resolved_paths.patterns}")
     # copy example task card if not present
     example = loop_dir / "examples" / "task_card.json"
     if not example.exists():
@@ -8257,30 +8231,30 @@ def cmd_status(*, tree: bool = False, dependency_map: bool = False, paths: LoopP
         marker = "EXISTS" if p.exists() else "missing"
         print(f"  {p.name}: {marker}")
     print()
-    project_facts = _load_project_facts()
-    pitfalls = _load_pitfalls()
-    patterns, stale_count = _load_patterns_with_governance(persist=False)
+    project_facts = _load_project_facts(paths=resolved_paths)
+    pitfalls = _load_pitfalls(paths=resolved_paths)
+    patterns, stale_count = _load_patterns_with_governance(persist=False, paths=resolved_paths)
     high_conf_count = sum(
         1 for entry in patterns if _coerce_confidence(entry.get("confidence"), default=0.0) >= PATTERN_HIGH_CONFIDENCE
     )
     print("Context files:")
     print(
         "  "
-        f"{_PROJECT_FACTS_FILE.name}: "
-        f"{'EXISTS' if _PROJECT_FACTS_FILE.exists() else 'missing'} "
+        f"{resolved_paths.project_facts.name}: "
+        f"{'EXISTS' if resolved_paths.project_facts.exists() else 'missing'} "
         f"(facts={len(project_facts)})"
     )
-    print(f"  {_PITFALLS_FILE.name}: {'EXISTS' if _PITFALLS_FILE.exists() else 'missing'} (pitfalls={len(pitfalls)})")
+    print(f"  {resolved_paths.pitfalls.name}: {'EXISTS' if resolved_paths.pitfalls.exists() else 'missing'} (pitfalls={len(pitfalls)})")
     print(
         "  "
-        f"{_PATTERNS_FILE.name}: "
-        f"{'EXISTS' if _PATTERNS_FILE.exists() else 'missing'} "
+        f"{resolved_paths.patterns.name}: "
+        f"{'EXISTS' if resolved_paths.patterns.exists() else 'missing'} "
         f"(entries={len(patterns)}, high_confidence={high_conf_count}, stale={stale_count})"
     )
     print()
     print("Heartbeats:")
     for role in ("worker", "reviewer"):
-        hb = _heartbeat_path(role)
+        hb = _heartbeat_path(role, paths=resolved_paths)
         marker = "EXISTS" if hb.exists() else "missing"
         print(f"  {hb.name}: {marker}")
     if tree:
@@ -8930,14 +8904,15 @@ def cmd_report(
         sys.exit(EXIT_GENERAL_ERROR)
 
 
-def cmd_heartbeat(role: str, interval: int) -> None:
+def cmd_heartbeat(role: str, interval: int, paths: LoopPaths | None = None) -> None:
     role = role.lower().strip()
     if role not in {"worker", "reviewer"}:
         print(f"Error: invalid role: {role}", file=sys.stderr)
         raise ValidationError(f"Invalid role: {role}")
-    LOOP_DIR.mkdir(exist_ok=True)
-    RUNTIME_DIR.mkdir(exist_ok=True)
-    hb = _heartbeat_path(role)
+    resolved_paths = _resolve_paths(paths)
+    resolved_paths.dir.mkdir(exist_ok=True)
+    resolved_paths.runtime_dir.mkdir(exist_ok=True)
+    hb = _heartbeat_path(role, paths=resolved_paths)
     _log(f"Heartbeat started for role={role} interval={interval}s")
     print(f"  Writing heartbeat: {hb}")
     print("  Press Ctrl+C to stop.")
@@ -9105,19 +9080,20 @@ def _single_round_subprocess_cmd(
     return cmd
 
 
-def _print_round_header(round_num: int, role: str) -> None:
+def _print_round_header(round_num: int, role: str, paths: LoopPaths | None = None) -> None:
+    resolved_paths = _resolve_paths(paths)
     title = role.capitalize()
     print(f"\n{'=' * 60}")
     print(f"  ROUND {round_num}  —  Awaiting {title}")
     print(f"{'=' * 60}")
     if role == "worker":
-        print(f"  Task card: {TASK_CARD}")
+        print(f"  Task card: {resolved_paths.task_card}")
         if round_num == 1:
             print("  Send task_card.json to Worker.")
         else:
             print("  Send fix_list.json to Worker.")
     elif role == "reviewer":
-        print(f"  Review request: {REVIEW_REQ}")
+        print(f"  Review request: {resolved_paths.review_request}")
 
 
 class SessionManager:
@@ -9413,6 +9389,7 @@ def _auto_dispatch_role(
     run_id: str | None = None,
     state: dict | None = None,
     lane_id: str | None = None,
+    paths: LoopPaths | None = None,
 ) -> dict | None:
     if not config.auto_dispatch:
         return None
@@ -9422,7 +9399,7 @@ def _auto_dispatch_role(
         if isinstance(lane_id, str) and lane_id.strip()
         else (_SERIAL_LANE_ID if role == "worker" else None)
     )
-    current_state = state if isinstance(state, dict) else _load_state()
+    current_state = state if isinstance(state, dict) else _load_state(paths=paths)
     session_policy = _resolve_session_resume_policy(
         current_state,
         role=role,
@@ -9474,6 +9451,7 @@ def _auto_dispatch_role(
             resume_session_id=resume_session_id,
             dispatch_started_at=dispatch_started_at,
             telemetry=dispatch_metrics,
+            paths=paths,
         )
 
     try:
@@ -9600,10 +9578,11 @@ def _issue_to_pitfall_line(issue: ReviewIssue) -> str | None:
     return f"[{severity}] {reason}".strip()
 
 
-def _append_pitfalls(lines: list[str]) -> int:
+def _append_pitfalls(lines: list[str], paths: LoopPaths | None = None) -> int:
     if not lines:
         return 0
-    existing = _read_markdown_knowledge_lines(_PITFALLS_FILE)
+    resolved_paths = _resolve_paths(paths)
+    existing = _read_markdown_knowledge_lines(resolved_paths.pitfalls)
     seen = set(existing)
     to_append: list[str] = []
     for line in lines:
@@ -9615,7 +9594,7 @@ def _append_pitfalls(lines: list[str]) -> int:
     if not to_append:
         return 0
 
-    current = _read_text_optional(_PITFALLS_FILE) or ""
+    current = _read_text_optional(resolved_paths.pitfalls) or ""
     merged_lines = current.splitlines() + [f"- {line}" for line in to_append]
     non_pitfall_lines = [line for line in merged_lines if not line.startswith("- ")]
     pitfall_lines = [line for line in merged_lines if line.startswith("- ")]
@@ -9626,13 +9605,14 @@ def _append_pitfalls(lines: list[str]) -> int:
     current = "\n".join(non_pitfall_lines + pitfall_lines)
     if current:
         current += "\n"
-    _atomic_write_text(_PITFALLS_FILE, current)
+    _atomic_write_text(resolved_paths.pitfalls, current)
     return len(to_append)
 
 
 @contextlib.contextmanager
-def _knowledge_write_lock():
-    lock = _LoopLock(_KNOWLEDGE_WRITE_LOCK_FILE)
+def _knowledge_write_lock(paths: LoopPaths | None = None):
+    lock_path = _resolve_paths(paths).knowledge_lock
+    lock = _LoopLock(lock_path)
     deadline = time.monotonic() + max(0.0, _KNOWLEDGE_WRITE_LOCK_TIMEOUT_SEC)
     while True:
         try:
@@ -9641,7 +9621,7 @@ def _knowledge_write_lock():
         except RuntimeError as e:
             if time.monotonic() >= deadline:
                 raise RuntimeError(
-                    f"knowledge context lock is unavailable ({_KNOWLEDGE_WRITE_LOCK_FILE})"
+                    f"knowledge context lock is unavailable ({lock_path})"
                 ) from e
             time.sleep(max(0.01, _KNOWLEDGE_WRITE_LOCK_RETRY_SEC))
     try:
@@ -9650,11 +9630,12 @@ def _knowledge_write_lock():
         lock.release()
 
 
-def _update_knowledge_on_approval(task_id: str, round_num: int, *, run_id: str | None = None) -> None:
+def _update_knowledge_on_approval(task_id: str, round_num: int, *, run_id: str | None = None, paths: LoopPaths | None = None) -> None:
+    resolved_paths = _resolve_paths(paths)
     sources: list[ReviewReport] = []
     effective_run_id = _normalize_run_id(run_id)
 
-    current_review_data = _read_json_if_exists(REVIEW_REPORT)
+    current_review_data = _read_json_if_exists(resolved_paths.review_report)
     if (
         isinstance(current_review_data, dict)
         and current_review_data.get("task_id") == task_id
@@ -9684,11 +9665,11 @@ def _update_knowledge_on_approval(task_id: str, round_num: int, *, run_id: str |
     if not blocking_issues:
         return
 
-    with _knowledge_write_lock():
+    with _knowledge_write_lock(paths=resolved_paths):
         pitfall_lines = [line for issue in blocking_issues if (line := _issue_to_pitfall_line(issue))]
-        appended_pitfalls = _append_pitfalls(pitfall_lines)
+        appended_pitfalls = _append_pitfalls(pitfall_lines, paths=resolved_paths)
 
-        existing_patterns, _ = _load_patterns_with_governance(persist=False)
+        existing_patterns, _ = _load_patterns_with_governance(persist=False, paths=resolved_paths)
         now_iso = _to_utc_iso8601(datetime.now(UTC))
         appended_patterns = 0
         for issue in blocking_issues:
@@ -9710,11 +9691,11 @@ def _update_knowledge_on_approval(task_id: str, round_num: int, *, run_id: str |
             existing_patterns = []
         elif len(existing_patterns) > _KNOWLEDGE_MAX_PATTERNS:
             existing_patterns = existing_patterns[-_KNOWLEDGE_MAX_PATTERNS:]
-        _write_patterns_jsonl(existing_patterns)
-        refreshed_patterns, _ = _load_patterns_with_governance(persist=False)
+        _write_patterns_jsonl(existing_patterns, paths=resolved_paths)
+        refreshed_patterns, _ = _load_patterns_with_governance(persist=False, paths=resolved_paths)
         _sync_knowledge_sqlite_index(
-            project_fact_entries=_load_project_facts(),
-            pitfall_entries=_load_pitfalls(),
+            project_fact_entries=_load_project_facts(paths=resolved_paths),
+            pitfall_entries=_load_pitfalls(paths=resolved_paths),
             pattern_entries=refreshed_patterns,
         )
     _log(
@@ -9769,7 +9750,6 @@ def _run_single_round(
     single_round: bool,
     paths: LoopPaths | None = None,
 ) -> None:
-    # TODO(paths): this function still has direct global path reads/writes; keep _global_paths sync in main loop.
     resolved_paths = _resolve_paths(paths)
     task_packet_path = resolved_paths.dir / "task_packet.json"
     _ = single_round
@@ -9954,7 +9934,7 @@ def _run_single_round(
         ),
     )
 
-    task_packet: TaskPacket = _build_task_packet(task_card, round_num)
+    task_packet: TaskPacket = _build_task_packet(task_card, round_num, paths=resolved_paths)
     task_packet_path.write_text(
         json.dumps(task_packet, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
@@ -9964,7 +9944,7 @@ def _run_single_round(
     _prepare_bus_file(resolved_paths.work_report, task_id, round_num, "work_report", run_id=run_id)
     _prepare_bus_file(resolved_paths.review_report, task_id, round_num, "review_report", run_id=run_id)
 
-    _print_round_header(round_num, "worker")
+    _print_round_header(round_num, "worker", paths=resolved_paths)
 
     resolve_git_refs = _is_git_repo_root(ROOT)
     work: WorkReport | None = None
@@ -10035,6 +10015,7 @@ def _run_single_round(
                     dispatch_started_at=dispatch_started_at,
                     telemetry=dispatch_metrics,
                     cwd=handle.path,
+                    paths=resolved_paths,
                 )
 
             artifact = _dispatch_with_artifact_fallback(
@@ -10215,6 +10196,7 @@ def _run_single_round(
                     dispatch_started_at=dispatch_started_at,
                     telemetry=dispatch_metrics,
                     cwd=lane_handle.path,
+                    paths=resolved_paths,
                 )
 
             artifact = _dispatch_with_artifact_fallback(
@@ -10592,6 +10574,7 @@ def _run_single_round(
                 artifact_path=resolved_paths.work_report,
                 run_id=run_id,
                 state=state,
+                paths=resolved_paths,
             )
         except RuntimeError as e:
             _fail_single_round(
@@ -10819,7 +10802,7 @@ def _run_single_round(
         archive_before_save=_archive_single_round_state,
     )
 
-    _print_round_header(round_num, "reviewer")
+    _print_round_header(round_num, "reviewer", paths=resolved_paths)
 
     review: ReviewReport | None = None
     try:
@@ -10832,6 +10815,7 @@ def _run_single_round(
             artifact_path=resolved_paths.review_report,
             run_id=run_id,
             state=state,
+            paths=resolved_paths,
         )
     except RuntimeError as e:
         _fail_single_round(
@@ -10917,7 +10901,7 @@ def _run_single_round(
 
     if decision == "approve":
         try:
-            _update_knowledge_on_approval(task_id, round_num, run_id=run_id)
+            _update_knowledge_on_approval(task_id, round_num, run_id=run_id, paths=resolved_paths)
         except OSError as e:
             _log(f"Warning: failed to update knowledge context on approval: {e}")
         _apply_state_transition(
@@ -11014,7 +10998,6 @@ def _run_multi_round_via_subprocess(
     resume_from_state: dict | None = None,
     paths: LoopPaths | None = None,
 ) -> None:
-    # TODO(paths): this function still has direct global path reads/writes; keep _global_paths sync in main loop.
     resolved_paths = _resolve_paths(paths)
     if not worktree_checked:
         _enforce_clean_worktree_or_exit(allow_dirty=config.allow_dirty)
@@ -11350,10 +11333,8 @@ def _main_loop(
     paths: LoopPaths | None = None,
 ) -> None:
     resolved_paths = _resolve_paths(paths)
-    global _global_paths
-    _global_paths = resolved_paths
-    if not _paths_match_globals(resolved_paths):
-        _apply_loop_paths(resolved_paths)
+    global _stored_paths
+    _stored_paths = resolved_paths
     _run_multi_round_via_subprocess(
         config=config,
         worktree_checked=worktree_checked,
@@ -11371,10 +11352,8 @@ def cmd_run(
     paths: LoopPaths | None = None,
 ) -> None:
     resolved_paths = _resolve_paths(paths)
-    global _global_paths
-    _global_paths = resolved_paths
-    if not _paths_match_globals(resolved_paths):
-        _apply_loop_paths(resolved_paths)
+    global _stored_paths
+    _stored_paths = resolved_paths
     try:
         _validate_run_config(config)
         lock: _LoopLock | None = None
@@ -11382,7 +11361,7 @@ def cmd_run(
         # holds the lock — skip lock acquisition to avoid self-deadlock.
         if not single_round:
             try:
-                lock = _acquire_run_lock()
+                lock = _acquire_run_lock(paths=resolved_paths)
             except RuntimeError as e:
                 print(f"Error: {e}", file=sys.stderr)
                 raise StateError(str(e)) from e
@@ -11692,19 +11671,19 @@ def main() -> None:
         parser.print_help()
         return
     try:
-        _configure_loop_paths(args.loop_dir)
+        resolved_paths = _configure_loop_paths(args.loop_dir)
         if args.cmd == "init":
-            cmd_init()
+            cmd_init(paths=resolved_paths)
         elif args.cmd == "index":
-            cmd_index()
+            cmd_index(paths=resolved_paths)
         elif args.cmd == "status":
-            cmd_status(tree=bool(args.tree), dependency_map=bool(args.dependency_map))
+            cmd_status(tree=bool(args.tree), dependency_map=bool(args.dependency_map), paths=resolved_paths)
         elif args.cmd == "health":
             cmd_health(args.ttl)
         elif args.cmd == "dispatch-metrics":
             cmd_dispatch_metrics(task_id=args.task_id, role=args.role)
         elif args.cmd == "heartbeat":
-            cmd_heartbeat(args.role, args.interval)
+            cmd_heartbeat(args.role, args.interval, paths=resolved_paths)
         elif args.cmd == "extract-diff":
             cmd_extract_diff(args.base, args.head)
         elif args.cmd == "diff":
@@ -11733,11 +11712,12 @@ def main() -> None:
                 knowledge_p.print_help()
                 raise ValidationError("knowledge subcommand required")
         elif args.cmd == "run":
-            file_cfg = _load_config()
+            resolved_paths = _resolve_paths()
+            file_cfg = _load_config(paths=resolved_paths)
             env_cfg = _load_env_config()
             # Resolve task path: --task > positional task_ref > config > default
             raw_ref = args.task if args.task is not None else args.task_ref
-            task_path = _resolve_task_path(raw_ref) or str(TASK_CARD)
+            task_path = _resolve_task_path(raw_ref) or str(resolved_paths.task_card)
 
             def _cfg_val(cli_val, config_key, builtin_default):
                 """CLI arg > env var > config file > builtin default."""
@@ -11845,6 +11825,7 @@ def main() -> None:
                 round_num=args.round,
                 resume=args.resume,
                 reset=args.reset,
+                paths=resolved_paths,
             )
     except KeyboardInterrupt:
         sys.exit(EXIT_INTERRUPTED)
