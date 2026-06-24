@@ -8527,8 +8527,8 @@ class TestCmdStatus:
         out = capsys.readouterr().out
 
         assert "Context files:" in out
-        assert "project_facts.md: EXISTS (facts=2)" in out
-        assert "pitfalls.md: EXISTS (pitfalls=1)" in out
+        assert "project_facts.md: EXISTS (facts=2, stale=0)" in out
+        assert "pitfalls.md: EXISTS (pitfalls=1, stale=0)" in out
         assert "patterns.jsonl: EXISTS (entries=2, high_confidence=1, stale=1)" in out
 
     def test_status_tree_shows_dependencies_and_blockers(self, tmp_path: Path, monkeypatch, capsys) -> None:
@@ -12689,3 +12689,144 @@ class TestStateDescriptorHandlerField:
         for name, desc in orchestrator.STATE_DESCRIPTORS.items():
             assert isinstance(desc.handler, str), f"{name} handler is not str"
             assert desc.handler, f"{name} handler is empty"
+
+
+class TestKnowledgeGovernanceT704:
+    """Tests for knowledge governance: auto-prune, stale detection, dedup during sync."""
+
+    def test_auto_prune_during_sync_removes_stale_entries(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        facts_path, pitfalls_path, patterns_path = _configure_default_knowledge_paths(monkeypatch, tmp_path)
+        now = datetime.now(UTC)
+        old_iso = (now - timedelta(days=100)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        fresh_iso = (now - timedelta(days=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        _write_jsonl(
+            facts_path,
+            [
+                {"fact": "old fact", "source_version": old_iso},
+                {"fact": "fresh fact", "source_version": fresh_iso},
+            ],
+        )
+        _write_jsonl(
+            pitfalls_path,
+            [
+                {"pitfall": "old pitfall", "source_version": old_iso},
+                {"pitfall": "fresh pitfall", "source_version": fresh_iso},
+            ],
+        )
+        _write_jsonl(
+            patterns_path,
+            [
+                {"pattern": "old pattern", "category": "workflow", "confidence": 0.2, "source_version": old_iso},
+                {"pattern": "fresh pattern", "category": "workflow", "confidence": 0.8, "source_version": fresh_iso},
+            ],
+        )
+
+        result = orchestrator._sync_knowledge_sqlite_index(
+            project_fact_entries=[],
+            pitfall_entries=[],
+            pattern_entries=[],
+        )
+
+        assert result["pruned"] == 3
+        assert result["ready"] is True
+
+        facts_entries = [
+            json.loads(line) for line in facts_path.read_text(encoding="utf-8").splitlines() if line.strip()
+        ]
+        pitfalls_entries = [
+            json.loads(line) for line in pitfalls_path.read_text(encoding="utf-8").splitlines() if line.strip()
+        ]
+        patterns_entries = [
+            json.loads(line) for line in patterns_path.read_text(encoding="utf-8").splitlines() if line.strip()
+        ]
+        assert len(facts_entries) == 1
+        assert facts_entries[0]["fact"] == "fresh fact"
+        assert len(pitfalls_entries) == 1
+        assert pitfalls_entries[0]["pitfall"] == "fresh pitfall"
+        assert len(patterns_entries) == 1
+        assert patterns_entries[0]["pattern"] == "fresh pattern"
+
+    def test_dedup_during_sync_reports_duplicate_count(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        _configure_loop_paths(monkeypatch, tmp_path)
+        context_dir = tmp_path / ".loop" / "context"
+        context_dir.mkdir(parents=True, exist_ok=True)
+        (context_dir / "project_facts.md").write_text(
+            "# facts\n- dup fact\n- dup fact\n- unique fact\n",
+            encoding="utf-8",
+        )
+        (context_dir / "pitfalls.md").write_text(
+            "# pitfalls\n- dup pitfall\n- dup pitfall\n",
+            encoding="utf-8",
+        )
+        now_iso = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        (context_dir / "patterns.jsonl").write_text(
+            json.dumps({"pattern": "dup pattern", "category": "workflow", "confidence": 0.5, "last_verified": now_iso}, ensure_ascii=False)
+            + "\n"
+            + json.dumps({"pattern": "dup pattern", "category": "workflow", "confidence": 0.9, "last_verified": now_iso}, ensure_ascii=False)
+            + "\n",
+            encoding="utf-8",
+        )
+
+        fact_entries = orchestrator._load_project_facts()
+        pitfall_entries = orchestrator._load_pitfalls()
+        pattern_entries, _ = orchestrator._load_patterns_with_governance(persist=False)
+
+        result = orchestrator._sync_knowledge_sqlite_index(
+            project_fact_entries=fact_entries,
+            pitfall_entries=pitfall_entries,
+            pattern_entries=pattern_entries,
+        )
+
+        assert result["deduped"] >= 3
+        assert result["ready"] is True
+
+    def test_cmd_status_shows_stale_counts_for_facts_and_pitfalls(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        _configure_loop_paths(monkeypatch, tmp_path)
+        facts_path, pitfalls_path, patterns_path = _configure_default_knowledge_paths(monkeypatch, tmp_path)
+        now = datetime.now(UTC)
+        old_iso = (now - timedelta(days=100)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        fresh_iso = (now - timedelta(days=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        _write_jsonl(
+            facts_path,
+            [
+                {"fact": "old fact", "source_version": old_iso},
+                {"fact": "fresh fact", "source_version": fresh_iso},
+            ],
+        )
+        _write_jsonl(
+            pitfalls_path,
+            [
+                {"pitfall": "old pitfall", "source_version": old_iso},
+                {"pitfall": "fresh pitfall", "source_version": fresh_iso},
+            ],
+        )
+        context_dir = tmp_path / ".loop" / "context"
+        context_dir.mkdir(parents=True, exist_ok=True)
+        (context_dir / "project_facts.md").write_text("# facts\n- fresh fact\n", encoding="utf-8")
+        (context_dir / "pitfalls.md").write_text("# pitfalls\n- fresh pitfall\n", encoding="utf-8")
+        now_iso = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        (context_dir / "patterns.jsonl").write_text(
+            json.dumps(
+                {"pattern": "fresh pattern", "category": "workflow", "confidence": 0.9, "last_verified": now_iso},
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        orchestrator.cmd_status()
+        out = capsys.readouterr().out
+
+        assert "facts=1, stale=1" in out
+        assert "pitfalls=1, stale=1" in out
+        assert "stale=0" in out  # patterns stale should be 0
+
+    def test_knowledge_stale_prune_days_constant_exists(self) -> None:
+        assert hasattr(orchestrator, "_KNOWLEDGE_STALE_PRUNE_DAYS")
+        assert orchestrator._KNOWLEDGE_STALE_PRUNE_DAYS == 90

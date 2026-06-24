@@ -421,6 +421,7 @@ _KNOWLEDGE_MAX_PROMPT_TOKENS = 500
 _KNOWLEDGE_SQLITE_SCHEMA_VERSION = 1
 _KNOWLEDGE_SQLITE_QUERY_BUFFER_MULTIPLIER = 6
 _KNOWLEDGE_BENCHMARK_MS_CLASS_THRESHOLD = 10.0
+_KNOWLEDGE_STALE_PRUNE_DAYS = 90
 _FEED_QUARANTINE_LOG_FILENAME = "feed.quarantine.jsonl"
 _KNOWLEDGE_STOPWORDS = {
     "a",
@@ -3547,10 +3548,38 @@ def _sync_knowledge_sqlite_index(
     pitfall_entries: list[dict[str, str]],
     pattern_entries: list[dict],
 ) -> dict[str, object]:
+    pruned_total = 0
+    for _, path, _ in _knowledge_default_specs():
+        if path.exists():
+            removed, _ = _prune_jsonl_by_source_version(path, _KNOWLEDGE_STALE_PRUNE_DAYS)
+            pruned_total += removed
+    if pruned_total > 0:
+        _feed_event(
+            FEED_LOG,
+            level="debug",
+            data=_feed_data(
+                role="orchestrator",
+                message=f"Knowledge auto-prune: removed {pruned_total} entries older than {_KNOWLEDGE_STALE_PRUNE_DAYS} days",
+            ),
+        )
+
+    deduped_facts, facts_dupes = _dedupe_text_knowledge_entries(
+        project_fact_entries,
+        text_field="fact",
+        default_category="facts",
+    )
+    deduped_pitfalls, pitfalls_dupes = _dedupe_text_knowledge_entries(
+        pitfall_entries,
+        text_field="pitfall",
+        default_category="pitfalls",
+    )
+    deduped_patterns, patterns_dupes = _dedupe_pattern_entries(pattern_entries)
+    dedup_total = facts_dupes + pitfalls_dupes + patterns_dupes
+
     rows = _knowledge_index_rows(
-        project_fact_entries=project_fact_entries,
-        pitfall_entries=pitfall_entries,
-        pattern_entries=pattern_entries,
+        project_fact_entries=deduped_facts,
+        pitfall_entries=deduped_pitfalls,
+        pattern_entries=deduped_patterns,
     )
     rows_version = _knowledge_rows_version(rows)
     conn = _connect_knowledge_db()
@@ -3566,6 +3595,8 @@ def _sync_knowledge_sqlite_index(
                     "fts_available": fts_available,
                     "row_count": len(rows),
                     "updated": False,
+                    "pruned": pruned_total,
+                    "deduped": dedup_total,
                 }
 
             conn.execute("DELETE FROM knowledge_entries")
@@ -3616,6 +3647,8 @@ def _sync_knowledge_sqlite_index(
             "fts_available": fts_available,
             "row_count": len(rows),
             "updated": True,
+            "pruned": pruned_total,
+            "deduped": dedup_total,
         }
     finally:
         conn.close()
@@ -4619,6 +4652,19 @@ def _prune_jsonl_by_source_version(path: Path, older_than_days: int) -> tuple[in
     if removed > 0:
         _atomic_write_jsonl(path, kept)
     return removed, len(kept)
+
+
+def _count_stale_jsonl_entries(path: Path, older_than_days: int) -> int:
+    entries = _read_jsonl_entries(path)
+    if not entries:
+        return 0
+    cutoff = datetime.now(UTC) - timedelta(days=older_than_days)
+    stale = 0
+    for entry in entries:
+        parsed = _parse_utc_iso8601(entry.get("source_version"))
+        if parsed is not None and parsed < cutoff:
+            stale += 1
+    return stale
 
 
 def _dedupe_text_knowledge_entries(
@@ -8477,14 +8523,20 @@ def cmd_status(*, tree: bool = False, dependency_map: bool = False, paths: LoopP
     high_conf_count = sum(
         1 for entry in patterns if _coerce_confidence(entry.get("confidence"), default=0.0) >= PATTERN_HIGH_CONFIDENCE
     )
+    facts_stale = _count_stale_jsonl_entries(_DEFAULT_FACTS_JSONL, _KNOWLEDGE_STALE_PRUNE_DAYS)
+    pitfalls_stale = _count_stale_jsonl_entries(_DEFAULT_PITFALLS_JSONL, _KNOWLEDGE_STALE_PRUNE_DAYS)
     print("Context files:")
     print(
         "  "
         f"{resolved_paths.project_facts.name}: "
         f"{'EXISTS' if resolved_paths.project_facts.exists() else 'missing'} "
-        f"(facts={len(project_facts)})"
+        f"(facts={len(project_facts)}, stale={facts_stale})"
     )
-    print(f"  {resolved_paths.pitfalls.name}: {'EXISTS' if resolved_paths.pitfalls.exists() else 'missing'} (pitfalls={len(pitfalls)})")
+    print(
+        f"  {resolved_paths.pitfalls.name}: "
+        f"{'EXISTS' if resolved_paths.pitfalls.exists() else 'missing'} "
+        f"(pitfalls={len(pitfalls)}, stale={pitfalls_stale})"
+    )
     print(
         "  "
         f"{resolved_paths.patterns.name}: "
