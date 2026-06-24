@@ -12008,3 +12008,229 @@ def test_orchestrator_error_class_names_are_unique() -> None:
     ]
 
     assert len(error_classes) == len(set(error_classes))
+
+
+# ── T-720: Phase 1 quick wins tests ────────────────────────────────────────────
+
+
+class TestDiffTruncation:
+    def test_short_diff_not_truncated(self) -> None:
+        diff = "some short diff content"
+        result, truncated = orchestrator._truncate_diff(diff)
+        assert result == diff
+        assert truncated is False
+
+    def test_long_diff_truncated_with_marker(self) -> None:
+        original = "x" * (orchestrator._MAX_DIFF_CHARS + 1000)
+        result, truncated = orchestrator._truncate_diff(original)
+        assert truncated is True
+        assert len(result) < len(original) + 200
+        assert "diff truncated" in result
+        assert str(orchestrator._MAX_DIFF_CHARS) in result
+        assert str(len(original)) in result
+        assert result.startswith("x" * orchestrator._MAX_DIFF_CHARS)
+
+    def test_diff_exactly_at_limit_not_truncated(self) -> None:
+        original = "x" * orchestrator._MAX_DIFF_CHARS
+        result, truncated = orchestrator._truncate_diff(original)
+        assert result == original
+        assert truncated is False
+
+    def test_diff_one_char_over_limit_is_truncated(self) -> None:
+        original = "x" * (orchestrator._MAX_DIFF_CHARS + 1)
+        result, truncated = orchestrator._truncate_diff(original)
+        assert truncated is True
+        assert "diff truncated" in result
+
+
+class TestReportUnknownKeyWarning:
+    def test_work_report_unknown_key_logs_warning(self, monkeypatch, capsys) -> None:
+        monkeypatch.setattr(orchestrator, "_log", lambda msg: None)
+        report = {
+            "task_id": "T-720",
+            "head_sha": "abc123",
+            "round": 1,
+            "run_id": "run-test",
+            "unknown_field": "value",
+        }
+        warnings: list[str] = []
+        monkeypatch.setattr(orchestrator, "_log", lambda msg: warnings.append(msg))
+        result = orchestrator._validate_report(
+            report,
+            expected_task_id="T-720",
+            expected_round=1,
+            expected_run_id="run-test",
+            schema="work_report",
+        )
+        assert result is None
+        assert any("unknown" in w and "unknown_field" in w for w in warnings)
+
+    def test_review_report_unknown_key_logs_warning(self, monkeypatch) -> None:
+        warnings: list[str] = []
+        monkeypatch.setattr(orchestrator, "_log", lambda msg: warnings.append(msg))
+        report = {
+            "task_id": "T-720",
+            "round": 1,
+            "run_id": "run-test",
+            "decision": "approve",
+            "bogus_key": 42,
+        }
+        result = orchestrator._validate_report(
+            report,
+            expected_task_id="T-720",
+            expected_round=1,
+            expected_run_id="run-test",
+            schema="review_report",
+        )
+        assert result is None
+        assert any("unknown" in w and "bogus_key" in w for w in warnings)
+
+    def test_work_report_known_keys_no_warning(self, monkeypatch) -> None:
+        warnings: list[str] = []
+        monkeypatch.setattr(orchestrator, "_log", lambda msg: warnings.append(msg))
+        report = {
+            "task_id": "T-720",
+            "head_sha": "abc123",
+            "round": 1,
+            "run_id": "run-test",
+            "files_changed": ["a.py"],
+            "notes": "done",
+        }
+        result = orchestrator._validate_report(
+            report,
+            expected_task_id="T-720",
+            expected_round=1,
+            expected_run_id="run-test",
+            schema="work_report",
+        )
+        assert result is None
+        assert not any("unknown" in w for w in warnings)
+
+    def test_review_report_decision_skipped_no_change_accepted(self, monkeypatch) -> None:
+        monkeypatch.setattr(orchestrator, "_log", lambda msg: None)
+        report = {
+            "task_id": "T-720",
+            "round": 1,
+            "run_id": "run-test",
+            "decision": "skipped_no_change",
+        }
+        result = orchestrator._validate_report(
+            report,
+            expected_task_id="T-720",
+            expected_round=1,
+            expected_run_id="run-test",
+            schema="review_report",
+        )
+        assert result is None
+
+    def test_review_report_invalid_decision_rejected(self, monkeypatch) -> None:
+        monkeypatch.setattr(orchestrator, "_log", lambda msg: None)
+        report = {
+            "task_id": "T-720",
+            "round": 1,
+            "run_id": "run-test",
+            "decision": "bogus_decision",
+        }
+        result = orchestrator._validate_report(
+            report,
+            expected_task_id="T-720",
+            expected_round=1,
+            expected_run_id="run-test",
+            schema="review_report",
+        )
+        assert result is not None
+        assert "decision" in result
+        assert "skipped_no_change" in result
+
+    def test_work_report_missing_files_changed_defaults_silently(self, monkeypatch) -> None:
+        monkeypatch.setattr(orchestrator, "_log", lambda msg: None)
+        report = {
+            "task_id": "T-720",
+            "head_sha": "abc123",
+            "round": 1,
+            "run_id": "run-test",
+        }
+        result = orchestrator._validate_report(
+            report,
+            expected_task_id="T-720",
+            expected_round=1,
+            expected_run_id="run-test",
+            schema="work_report",
+        )
+        assert result is None
+
+
+class TestConfigUnknownKeyWarning:
+    def test_unknown_config_key_logs_warning(self, tmp_path: Path, monkeypatch) -> None:
+        _configure_loop_paths(monkeypatch, tmp_path)
+        config_json = tmp_path / ".loop" / "config.json"
+        config_json.write_text(
+            json.dumps({"max_rounds": 3, "bogus_key": "val"}),
+            encoding="utf-8",
+        )
+        warnings: list[str] = []
+        monkeypatch.setattr(orchestrator, "_log", lambda msg: warnings.append(msg))
+        loaded = orchestrator._load_config()
+        assert loaded["max_rounds"] == 3
+        assert any("bogus_key" in w and "unknown" in w for w in warnings)
+
+    def test_known_config_keys_no_warning(self, tmp_path: Path, monkeypatch) -> None:
+        _configure_loop_paths(monkeypatch, tmp_path)
+        config_json = tmp_path / ".loop" / "config.json"
+        config_json.write_text(
+            json.dumps({"max_rounds": 3, "verbose": True}),
+            encoding="utf-8",
+        )
+        warnings: list[str] = []
+        monkeypatch.setattr(orchestrator, "_log", lambda msg: warnings.append(msg))
+        loaded = orchestrator._load_config()
+        assert loaded["max_rounds"] == 3
+        assert not any("unknown" in w for w in warnings)
+
+    def test_known_config_keys_frozenset_includes_all_runconfig_fields(self) -> None:
+        import dataclasses
+
+        rc_fields = {f.name for f in dataclasses.fields(orchestrator.RunConfig)}
+        assert rc_fields <= orchestrator._KNOWN_CONFIG_KEYS
+
+
+class TestPatternDedupGuard:
+    def test_duplicate_patterns_log_warning(self, tmp_path: Path, monkeypatch) -> None:
+        _configure_loop_paths(monkeypatch, tmp_path)
+        patterns_path = tmp_path / ".loop" / "context" / "patterns.jsonl"
+        patterns_path.parent.mkdir(parents=True, exist_ok=True)
+        entries = [
+            {"pattern": "dup", "category": "workflow", "confidence": 0.9},
+            {"pattern": "dup", "category": "workflow", "confidence": 0.8},
+            {"pattern": "unique", "category": "workflow", "confidence": 0.5},
+        ]
+        warnings: list[str] = []
+        monkeypatch.setattr(orchestrator, "_log", lambda msg: warnings.append(msg))
+        orchestrator._write_patterns_jsonl(entries)
+        assert any("duplicate" in w.lower() for w in warnings)
+
+    def test_no_duplicates_no_warning(self, tmp_path: Path, monkeypatch) -> None:
+        _configure_loop_paths(monkeypatch, tmp_path)
+        patterns_path = tmp_path / ".loop" / "context" / "patterns.jsonl"
+        patterns_path.parent.mkdir(parents=True, exist_ok=True)
+        entries = [
+            {"pattern": "pat1", "category": "workflow", "confidence": 0.9},
+            {"pattern": "pat2", "category": "workflow", "confidence": 0.5},
+        ]
+        warnings: list[str] = []
+        monkeypatch.setattr(orchestrator, "_log", lambda msg: warnings.append(msg))
+        orchestrator._write_patterns_jsonl(entries)
+        assert not any("duplicate" in w.lower() for w in warnings)
+
+    def test_same_pattern_different_category_not_duplicate(self, tmp_path: Path, monkeypatch) -> None:
+        _configure_loop_paths(monkeypatch, tmp_path)
+        patterns_path = tmp_path / ".loop" / "context" / "patterns.jsonl"
+        patterns_path.parent.mkdir(parents=True, exist_ok=True)
+        entries = [
+            {"pattern": "same", "category": "workflow", "confidence": 0.9},
+            {"pattern": "same", "category": "bug", "confidence": 0.5},
+        ]
+        warnings: list[str] = []
+        monkeypatch.setattr(orchestrator, "_log", lambda msg: warnings.append(msg))
+        orchestrator._write_patterns_jsonl(entries)
+        assert not any("duplicate" in w.lower() for w in warnings)

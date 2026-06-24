@@ -168,6 +168,7 @@ class ReviewRequest(TypedDict):
     head_sha: str
     commits: str
     diff: str
+    diff_truncated: bool
     acceptance_criteria: list[str]
     constraints: list[str]
     round: int
@@ -240,7 +241,7 @@ _SECTION_OWNERSHIP_MAP: dict[str, tuple[str, ...]] = {
     "lock": ("_lock_file", "_unlock_file", "_LoopLock", "_acquire_run_lock"),
     "dispatch": ("register_backend", "_agent_command", "_run_auto_dispatch", "_dispatch_with_artifact_fallback"),
     "session": ("SessionManager", "_session_resume_id", "_resolve_session_resume_policy", "_store_session"),
-    "config": ("RunConfig", "_load_config", "_load_env_config", "_validate_run_config"),
+    "config": ("RunConfig", "_load_config", "_load_env_config", "_validate_run_config", "_warn_unknown_config_keys"),
     "prompts": ("_render_task_packet_section", "_worker_prompt", "_reviewer_prompt"),
 }
 
@@ -462,6 +463,30 @@ _LANE_EXCEPTION_TYPE_MAX_LEN = 120
 _LANE_EXCEPTION_MESSAGE_MAX_LEN = 300
 _LANE_EXCEPTION_TRACEBACK_MAX_LEN = 4000
 _TRACEBACK_TRUNCATION_MARKER = "\n...[truncated]...\n"
+_MAX_DIFF_CHARS = 50000
+_KNOWN_CONFIG_KEYS: frozenset[str] = frozenset({
+    "task_path",
+    "max_rounds",
+    "timeout",
+    "require_heartbeat",
+    "heartbeat_ttl",
+    "auto_dispatch",
+    "dispatch_backend",
+    "worker_backend",
+    "reviewer_backend",
+    "backend_preference",
+    "dispatch_timeout",
+    "dispatch_retries",
+    "dispatch_retry_base_sec",
+    "max_session_rounds",
+    "max_parallel_workers",
+    "aggressive_parallelism",
+    "artifact_timeout",
+    "worker_noop_as_error",
+    "allow_dirty",
+    "verbose",
+})
+_VALID_REVIEW_DECISIONS: frozenset[str] = frozenset({"approve", "changes_required", "skipped_no_change"})
 
 
 class DispatchTimeoutError(RuntimeError):
@@ -4058,6 +4083,19 @@ def _normalize_pattern_entry(
 
 def _write_patterns_jsonl(entries: list[dict], paths: LoopPaths | None = None) -> None:
     resolved_paths = _resolve_paths(paths)
+    seen: set[tuple[str, str]] = set()
+    duplicates: list[tuple[str, str]] = []
+    for item in entries:
+        dedup_key = (str(item.get("pattern", "")), str(item.get("category", "")))
+        if dedup_key in seen:
+            duplicates.append(dedup_key)
+        else:
+            seen.add(dedup_key)
+    if duplicates:
+        _log(
+            f"Warning: duplicate pattern signatures detected before write: "
+            f"{len(duplicates)} duplicate(s). Dedup key: (pattern, category)"
+        )
     normalized_entries = [{k: v for k, v in item.items() if k != "source_version"} for item in entries]
     _atomic_write_jsonl(resolved_paths.patterns, normalized_entries)
 
@@ -6835,6 +6873,15 @@ def _diff(base: str, head: str) -> str:
     return _git("diff", f"{base}..{head}")
 
 
+def _truncate_diff(diff: str, max_chars: int = _MAX_DIFF_CHARS) -> tuple[str, bool]:
+    if len(diff) <= max_chars:
+        return diff, False
+    original_len = len(diff)
+    marker = f"\n... [diff truncated: {original_len} -> {max_chars} chars]\n"
+    truncated = diff[:max_chars] + marker
+    return truncated, True
+
+
 def _log_oneline(base: str, head: str) -> str:
     return _git("log", "--oneline", f"{base}..{head}")
 
@@ -7489,16 +7536,30 @@ def _load_config(paths: LoopPaths | None = None) -> dict:
     if config_yaml.is_file():
         yaml_data = _load_config_from_yaml(config_yaml)
         if yaml_data:
+            _warn_unknown_config_keys(yaml_data)
             return yaml_data
     if not config_file.is_file():
         return {}
     try:
         data = _load_json_with_limit(config_file, label=config_file.name)
-        return data if isinstance(data, dict) else {}
+        if isinstance(data, dict):
+            _warn_unknown_config_keys(data)
+            return data
+        return {}
     except ConfigError:
         raise
     except (json.JSONDecodeError, OSError):
         return {}
+
+
+def _warn_unknown_config_keys(data: dict) -> None:
+    unknown_keys = set(data.keys()) - _KNOWN_CONFIG_KEYS
+    if unknown_keys:
+        _log(
+            f"Warning: config contains unknown key(s): "
+            f"{', '.join(sorted(unknown_keys))}. "
+            f"Known config keys: {', '.join(sorted(_KNOWN_CONFIG_KEYS))}"
+        )
 
 
 def _load_config_from_yaml(path: Path) -> dict:
@@ -7720,6 +7781,12 @@ def _validate_report(
             "round": int,
         }
         prefix = "work_report"
+        known_keys: frozenset[str] = frozenset({
+            "task_id", "run_id", "head_sha", "round", "files_changed",
+            "tests", "notes", "lane_id", "status", "backend",
+            "duration_ms", "input_tokens", "output_tokens", "total_tokens",
+            "cost_cents", "lane_metrics", "merge_provenance",
+        })
     elif schema == "review_report":
         required_types = {
             "task_id": str,
@@ -7727,8 +7794,19 @@ def _validate_report(
             "decision": str,
         }
         prefix = "review_report"
+        known_keys = frozenset({
+            "task_id", "run_id", "decision", "round",
+            "blocking_issues", "non_blocking_suggestions",
+        })
     else:
         raise ValueError(f"Unknown schema: {schema}")
+
+    unknown_keys = set(report.keys()) - known_keys
+    if unknown_keys:
+        _log(
+            f"Warning: {prefix} contains unknown top-level key(s): "
+            f"{', '.join(sorted(unknown_keys))}. Known keys: {', '.join(sorted(known_keys))}"
+        )
 
     for field_name, typ in required_types.items():
         if field_name not in report:
@@ -7813,10 +7891,10 @@ def _validate_report(
                                 f"{prefix} lane_metrics[{index}] field '{lane_int_field}' "
                                 f"must be non-negative int"
                             )
-    elif schema == "review_report" and report["decision"] not in {"approve", "changes_required"}:
+    elif schema == "review_report" and report["decision"] not in _VALID_REVIEW_DECISIONS:
         return (
             f"{prefix} field 'decision' must be one of "
-            "{{'approve', 'changes_required'}}, "
+            f"{sorted(_VALID_REVIEW_DECISIONS)}, "
             f"got {report['decision']!r}"
         )
 
@@ -10755,7 +10833,7 @@ def _run_single_round(
         return
 
     try:
-        diff = _diff(base_sha, head_sha)
+        raw_diff = _diff(base_sha, head_sha)
         commits = _log_oneline(base_sha, head_sha)
     except RuntimeError as e:
         _fail_single_round(
@@ -10763,6 +10841,14 @@ def _run_single_round(
             message=f"Failed to compare commits for base={base_sha} head={head_sha}: {e}",
         )
         return
+
+    if not raw_diff.strip():
+        _log(
+            f"Warning: empty diff after worker dispatch for task_id={task_id} "
+            f"round={round_num} — worker may not have committed changes"
+        )
+
+    diff, diff_truncated = _truncate_diff(raw_diff)
 
     _log(f"Worker done. head_sha={head_sha}")
     _persist_worker_handoff(
@@ -10781,6 +10867,7 @@ def _run_single_round(
         "head_sha": head_sha,
         "commits": commits,
         "diff": diff,
+        "diff_truncated": diff_truncated,
         "acceptance_criteria": task_card.get("acceptance_criteria", []),
         "constraints": task_card.get("constraints", []),
         "round": round_num,
