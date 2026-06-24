@@ -12010,6 +12010,259 @@ def test_orchestrator_error_class_names_are_unique() -> None:
     assert len(error_classes) == len(set(error_classes))
 
 
+# ── T-724: improved knowledge retrieval tests ─────────────────────────────────
+
+
+class TestKnowledgeQueryTokensT724:
+    def test_path_tokens_extracts_last_two_components(self) -> None:
+        result = orchestrator._path_tokens("src/loop_kit/orchestrator.py")
+        assert "loop_kit" in result or "loop" in result
+        assert "orchestrator" in result
+
+    def test_path_tokens_single_component(self) -> None:
+        result = orchestrator._path_tokens("cli.py")
+        assert "cli" in result
+
+    def test_path_tokens_filters_stopwords(self) -> None:
+        result = orchestrator._path_tokens("src/the/lib/util.py")
+        assert "the" not in result
+        assert "lib" in result
+        assert "util" in result
+
+    def test_knowledge_query_tokens_returns_weighted_dict(self) -> None:
+        result = orchestrator._knowledge_query_tokens(
+            "T-724",
+            1,
+            {
+                "goal": "keyword retrieval scoring keyword",
+                "acceptance_criteria": ["retrieval scoring"],
+            },
+        )
+        assert isinstance(result, dict)
+        for v in result.values():
+            assert isinstance(v, float)
+            assert 0.0 < v <= 1.0
+        assert "keyword" in result
+        assert "retrieval" in result
+        assert "scoring" in result
+        assert result["retrieval"] >= result["keyword"]
+        assert result["scoring"] >= result["keyword"]
+
+    def test_knowledge_query_tokens_includes_in_scope_path_tokens(self) -> None:
+        result = orchestrator._knowledge_query_tokens(
+            "T-724",
+            1,
+            {
+                "goal": "whatever",
+                "in_scope": ["src/loop_kit/orchestrator.py"],
+            },
+        )
+        assert isinstance(result, dict)
+        assert "loop_kit" in result or any("loop" in k for k in result)
+        assert "orchestrator" in result
+
+    def test_knowledge_query_tokens_includes_lane_tokens(self) -> None:
+        result = orchestrator._knowledge_query_tokens(
+            "T-724",
+            1,
+            {
+                "goal": "whatever",
+                "lanes": [
+                    {"lane_id": "lane_core", "owner_paths": ["src/loop_kit/orchestrator.py", "tests/test_orchestrator.py"]}
+                ],
+            },
+        )
+        assert isinstance(result, dict)
+        assert "lane" in result
+        assert "core" in result
+        assert "orchestrator" in result or any("orchestrator" in k for k in result)
+
+    def test_knowledge_query_tokens_prior_round_feedback(self, tmp_path: Path, monkeypatch) -> None:
+        _configure_loop_paths(monkeypatch, tmp_path)
+        loop_dir = tmp_path / ".loop"
+        loop_dir.mkdir(parents=True, exist_ok=True)
+        (loop_dir / "work_report.json").write_text(
+            json.dumps({"task_id": "T-724", "round": 1, "notes": "worker feedback note here"}),
+            encoding="utf-8",
+        )
+        (loop_dir / "review_report.json").write_text(
+            json.dumps(
+                {
+                    "task_id": "T-724",
+                    "round": 1,
+                    "decision": "changes_required",
+                    "blocking_issues": [
+                        {"reason": "missing edge case", "file": "orchestrator.py", "category": "logic"}
+                    ],
+                    "non_blocking_suggestions": ["add more docstrings"],
+                }
+            ),
+            encoding="utf-8",
+        )
+        result = orchestrator._knowledge_query_tokens("T-724", 2, {})
+        assert isinstance(result, dict)
+        assert "worker" in result
+        assert "feedback" in result
+        assert "note" in result
+        assert "missing" in result
+        assert "edge" in result
+        assert "case" in result
+        assert "docstrings" in result
+
+    def test_knowledge_query_tokens_round1_no_prior_feedback(self) -> None:
+        result = orchestrator._knowledge_query_tokens("T-724", 1, {})
+        assert isinstance(result, dict)
+        assert "notes" not in result
+
+
+class TestKnowledgeScoreT724:
+    def test_knowledge_score_weights_multi_fragment_tokens(self) -> None:
+        weights = {"keyword": 0.5, "retrieval": 1.0, "scoring": 0.5}
+        score = orchestrator._knowledge_score("keyword retrieval for prompt rendering", weights)
+        assert 0.4 < score < 0.9
+        assert isinstance(score, float)
+
+    def test_knowledge_score_returns_zero_for_no_match(self) -> None:
+        weights = {"keyword": 1.0, "retrieval": 1.0}
+        score = orchestrator._knowledge_score("unrelated fact about filesystems", weights)
+        assert score == 0.0
+
+    def test_knowledge_score_returns_zero_for_empty_weights(self) -> None:
+        score = orchestrator._knowledge_score("some text", {})
+        assert score == 0.0
+
+    def test_knowledge_score_weight_is_between_zero_and_one(self) -> None:
+        weights = {"kw": 1.0}
+        score = orchestrator._knowledge_score("kw", weights)
+        assert 0.0 <= score <= 1.0
+        heavy_weights = {"kw": 1.0}
+        perfect_score = orchestrator._knowledge_score("kw", heavy_weights)
+        assert perfect_score == 1.0
+
+
+class TestKnowledgeBudgetT724:
+    def test_render_knowledge_section_respects_token_budget(self, tmp_path: Path, monkeypatch) -> None:
+        _configure_loop_paths(monkeypatch, tmp_path)
+        monkeypatch.setattr(orchestrator, "_KNOWLEDGE_RETRIEVAL_FACT_CAP", 10)
+        monkeypatch.setattr(orchestrator, "_KNOWLEDGE_RETRIEVAL_PITFALL_CAP", 10)
+        monkeypatch.setattr(orchestrator, "_KNOWLEDGE_RETRIEVAL_PATTERN_CAP", 10)
+        monkeypatch.setattr(orchestrator, "_KNOWLEDGE_RETRIEVAL_FALLBACK_CAP", 1)
+
+        context_dir = tmp_path / ".loop" / "context"
+        context_dir.mkdir(parents=True, exist_ok=True)
+        facts = [f"- dispatch workflow fact dispatch workflow fact {i}" for i in range(1, 10)]
+        pitfalls = [f"- dispatch workflow pitfall dispatch workflow pitfall {i}" for i in range(1, 10)]
+        (context_dir / "project_facts.md").write_text("# facts\n" + "\n".join(facts) + "\n", encoding="utf-8")
+        (context_dir / "pitfalls.md").write_text("# pitfalls\n" + "\n".join(pitfalls) + "\n", encoding="utf-8")
+        now_iso = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        pattern_lines = [
+            json.dumps(
+                {
+                    "pattern": f"dispatch workflow pattern dispatch workflow pattern {i}",
+                    "category": "workflow",
+                    "confidence": 0.9,
+                    "last_verified": now_iso,
+                },
+                ensure_ascii=False,
+            )
+            for i in range(1, 10)
+        ]
+        (context_dir / "patterns.jsonl").write_text("\n".join(pattern_lines) + "\n", encoding="utf-8")
+
+        section = orchestrator._render_knowledge_section(
+            "T-724",
+            1,
+            {"goal": "dispatch workflow optimize prompts"},
+            max_tokens=50,
+        )
+        token_count = len(section.split())
+        assert token_count <= 55  # allow small margin for section headers
+        assert "truncated" in section
+
+    def test_render_knowledge_section_no_truncation_when_under_budget(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        _configure_loop_paths(monkeypatch, tmp_path)
+        monkeypatch.setattr(orchestrator, "_KNOWLEDGE_RETRIEVAL_FACT_CAP", 1)
+        monkeypatch.setattr(orchestrator, "_KNOWLEDGE_RETRIEVAL_PITFALL_CAP", 1)
+        monkeypatch.setattr(orchestrator, "_KNOWLEDGE_RETRIEVAL_PATTERN_CAP", 1)
+        monkeypatch.setattr(orchestrator, "_KNOWLEDGE_RETRIEVAL_FALLBACK_CAP", 1)
+
+        context_dir = tmp_path / ".loop" / "context"
+        context_dir.mkdir(parents=True, exist_ok=True)
+        (context_dir / "project_facts.md").write_text("# facts\n- keyword retrieval\n", encoding="utf-8")
+        (context_dir / "pitfalls.md").write_text("# pitfalls\n- prompt bloat\n", encoding="utf-8")
+        now_iso = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        (context_dir / "patterns.jsonl").write_text(
+            json.dumps(
+                {
+                    "pattern": "keyword retrieval pattern",
+                    "category": "prompt",
+                    "confidence": 0.9,
+                    "last_verified": now_iso,
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        section = orchestrator._render_knowledge_section(
+            "T-724",
+            1,
+            {"goal": "keyword retrieval prompt"},
+        )
+        assert "truncated" not in section
+
+    def test_render_knowledge_section_uses_default_max_tokens(self, tmp_path: Path, monkeypatch) -> None:
+        _configure_loop_paths(monkeypatch, tmp_path)
+        section = orchestrator._render_knowledge_section("T-724", 1, {"goal": "xyz"})
+        assert isinstance(section, str)
+
+
+class TestRecencyFallbackT724:
+    def test_select_ranked_text_knowledge_fallback_by_recency(self) -> None:
+        weights = {"unmatched": 1.0}
+        entries = ["gamma entry", "alpha entry", "beta entry"]
+        result = orchestrator._select_ranked_text_knowledge(
+            entries,
+            query_token_weights=weights,
+            cap=2,
+        )
+        assert isinstance(result, list)
+        assert len(result) >= 1
+        assert result[0] == "gamma entry"
+
+    def test_select_ranked_patterns_fallback_by_recency(self) -> None:
+        weights = {"unmatched": 1.0}
+        recent_iso = "2026-06-01T00:00:00Z"
+        older_iso = "2026-01-01T00:00:00Z"
+        entries = [
+            {"pattern": "alpha pattern", "category": "workflow", "confidence": 0.8, "last_verified": older_iso},
+            {"pattern": "beta pattern", "category": "workflow", "confidence": 0.9, "last_verified": recent_iso},
+            {"pattern": "gamma pattern", "category": "workflow", "confidence": 0.85, "last_verified": older_iso},
+        ]
+        result = orchestrator._select_ranked_patterns(
+            entries,
+            query_token_weights=weights,
+            cap=1,
+        )
+        assert len(result) == 1
+        assert "beta pattern" in result[0]
+
+    def test_recency_sort_empty_verified_treated_as_oldest(self) -> None:
+        weights = {"unmatched": 1.0}
+        entries = [
+            "entry with no verified",
+            "entry also no verified",
+        ]
+        result = orchestrator._select_ranked_text_knowledge(
+            entries,
+            query_token_weights=weights,
+            cap=1,
+        )
+        assert len(result) == 1
+
+
 # ── T-720: Phase 1 quick wins tests ────────────────────────────────────────────
 
 

@@ -413,6 +413,7 @@ _KNOWLEDGE_RETRIEVAL_PITFALL_CAP = 4
 _KNOWLEDGE_RETRIEVAL_PATTERN_CAP = 4
 _KNOWLEDGE_RETRIEVAL_MIN_SCORE = 1
 _KNOWLEDGE_RETRIEVAL_FALLBACK_CAP = 1
+_KNOWLEDGE_MAX_PROMPT_TOKENS = 500
 _KNOWLEDGE_SQLITE_SCHEMA_VERSION = 1
 _KNOWLEDGE_SQLITE_QUERY_BUFFER_MULTIPLIER = 6
 _KNOWLEDGE_BENCHMARK_MS_CLASS_THRESHOLD = 10.0
@@ -3799,24 +3800,24 @@ def _query_knowledge_sqlite(
 
 def _fallback_ranked_knowledge(
     *,
-    query_tokens: set[str],
+    query_token_weights: dict[str, float],
     project_facts: list[str],
     active_pitfalls: list[str],
     patterns: list[dict],
 ) -> tuple[list[str], list[str], list[str]]:
     selected_facts = _select_ranked_text_knowledge(
         project_facts,
-        query_tokens=query_tokens,
+        query_token_weights=query_token_weights,
         cap=_KNOWLEDGE_RETRIEVAL_FACT_CAP,
     )
     selected_pitfalls = _select_ranked_text_knowledge(
         active_pitfalls,
-        query_tokens=query_tokens,
+        query_token_weights=query_token_weights,
         cap=_KNOWLEDGE_RETRIEVAL_PITFALL_CAP,
     )
     selected_patterns = _select_ranked_patterns(
         patterns,
-        query_tokens=query_tokens,
+        query_token_weights=query_token_weights,
         cap=_KNOWLEDGE_RETRIEVAL_PATTERN_CAP,
     )
     return selected_facts, selected_pitfalls, selected_patterns
@@ -3824,7 +3825,7 @@ def _fallback_ranked_knowledge(
 
 def _retrieve_ranked_knowledge(
     *,
-    query_tokens: set[str],
+    query_token_weights: dict[str, float],
     query_text: str,
     project_fact_entries: list[dict[str, str]],
     pitfall_entries: list[dict[str, str]],
@@ -3834,7 +3835,7 @@ def _retrieve_ranked_knowledge(
     project_facts = [entry["fact"] for entry in project_fact_entries]
     active_pitfalls = [entry["pitfall"] for entry in pitfall_entries]
     fallback_facts, fallback_pitfalls, fallback_patterns = _fallback_ranked_knowledge(
-        query_tokens=query_tokens,
+        query_token_weights=query_token_weights,
         project_facts=project_facts,
         active_pitfalls=active_pitfalls,
         patterns=patterns,
@@ -3847,8 +3848,9 @@ def _retrieve_ranked_knowledge(
         "row_count": 0,
         "fts_available": False,
     }
-    if not query_tokens:
+    if not query_token_weights:
         return selected_facts, selected_pitfalls, selected_patterns, diagnostics
+    query_tokens_set = set(query_token_weights.keys())
     try:
         if sync_index:
             sync_result = _sync_knowledge_sqlite_index(
@@ -3859,7 +3861,7 @@ def _retrieve_ranked_knowledge(
             diagnostics["row_count"] = int(sync_result.get("row_count", 0))
             diagnostics["fts_available"] = bool(sync_result.get("fts_available"))
         indexed_facts, indexed_pitfalls, indexed_patterns, sqlite_backend = _query_knowledge_sqlite(
-            query_tokens=query_tokens,
+            query_tokens=query_tokens_set,
             query_text=query_text,
             fact_cap=_KNOWLEDGE_RETRIEVAL_FACT_CAP,
             pitfall_cap=_KNOWLEDGE_RETRIEVAL_PITFALL_CAP,
@@ -3885,10 +3887,17 @@ def _knowledge_tokens(text: object) -> set[str]:
     return {token for token in normalized.split() if len(token) > 1 and token not in _KNOWLEDGE_STOPWORDS}
 
 
-def _knowledge_score(text: object, query_tokens: set[str]) -> int:
-    if not query_tokens:
-        return 0
-    return len(_knowledge_tokens(text) & query_tokens)
+def _knowledge_score(text: object, query_token_weights: dict[str, float]) -> float:
+    if not query_token_weights:
+        return 0.0
+    text_tokens = _knowledge_tokens(text)
+    if not text_tokens:
+        return 0.0
+    total_weight = sum(query_token_weights.values())
+    if total_weight <= 0:
+        return 0.0
+    matched_weight = sum(query_token_weights[token] for token in text_tokens if token in query_token_weights)
+    return matched_weight / total_weight
 
 
 def _iter_task_card_query_fragments(task_card: TaskCard | None) -> list[str]:
@@ -3911,6 +3920,24 @@ def _iter_task_card_query_fragments(task_card: TaskCard | None) -> list[str]:
         for item in deps:
             if isinstance(item, str) and item.strip():
                 fragments.append(item.strip())
+    in_scope = task_card.get("in_scope")
+    if isinstance(in_scope, list):
+        for item in in_scope:
+            if isinstance(item, str) and item.strip():
+                fragments.extend(_path_tokens(item))
+    lanes = task_card.get("lanes")
+    if isinstance(lanes, list):
+        for lane in lanes:
+            if not isinstance(lane, dict):
+                continue
+            lane_id = lane.get("lane_id")
+            if isinstance(lane_id, str) and lane_id.strip():
+                fragments.append(lane_id.strip())
+            owner_paths = lane.get("owner_paths")
+            if isinstance(owner_paths, list):
+                for op in owner_paths:
+                    if isinstance(op, str) and op.strip():
+                        fragments.extend(_path_tokens(op))
     return fragments
 
 
@@ -3934,69 +3961,150 @@ def _iter_fix_list_query_fragments(round_num: int, paths: LoopPaths | None = Non
     return fragments
 
 
+def _path_tokens(path_str: str) -> list[str]:
+    parts = re.split(r"[\\/]+", path_str)
+    components = parts[-2:] if len(parts) >= 2 else parts
+    tokens: list[str] = []
+    for comp in components:
+        if not comp:
+            continue
+        for token in _knowledge_tokens(comp):
+            if token not in tokens:
+                tokens.append(token)
+    return tokens
+
+
+def _iter_prior_round_feedback_fragments(round_num: int, paths: LoopPaths | None = None) -> list[str]:
+    if round_num <= 1:
+        return []
+    resolved = _resolve_paths(paths)
+    fragments: list[str] = []
+    work_report_data = _read_json_if_exists(resolved.work_report)
+    if isinstance(work_report_data, dict):
+        for key in ("notes",):
+            value = work_report_data.get(key)
+            if isinstance(value, str) and value.strip():
+                fragments.append(value.strip())
+    review_report_data = _read_json_if_exists(resolved.review_report)
+    if isinstance(review_report_data, dict):
+        for key in ("reviewer_notes",):
+            value = review_report_data.get(key)
+            if isinstance(value, str) and value.strip():
+                fragments.append(value.strip())
+        for issues_key in ("fixes", "blocking_issues"):
+            issues = review_report_data.get(issues_key)
+            if isinstance(issues, list):
+                for issue in issues:
+                    if not isinstance(issue, dict):
+                        continue
+                    for key in ("reason", "required_change", "file", "category"):
+                        value = issue.get(key)
+                        if isinstance(value, str) and value.strip():
+                            fragments.append(value.strip())
+        non_blocking = review_report_data.get("non_blocking_suggestions")
+        if isinstance(non_blocking, list):
+            for item in non_blocking:
+                if isinstance(item, str) and item.strip():
+                    fragments.append(item.strip())
+    fix_list_data = _read_json_if_exists(resolved.fix_list)
+    if isinstance(fix_list_data, dict):
+        prior_notes = fix_list_data.get("prior_round_notes")
+        if isinstance(prior_notes, str) and prior_notes.strip():
+            fragments.append(prior_notes.strip())
+        prior_non_blocking = fix_list_data.get("prior_review_non_blocking")
+        if isinstance(prior_non_blocking, list):
+            for item in prior_non_blocking:
+                if isinstance(item, str) and item.strip():
+                    fragments.append(item.strip())
+    return fragments
+
+
 def _knowledge_query_fragments(task_id: str, round_num: int, task_card: TaskCard | None) -> list[str]:
     query_fragments = [task_id]
     query_fragments.extend(_iter_task_card_query_fragments(task_card))
     query_fragments.extend(_iter_fix_list_query_fragments(round_num))
+    query_fragments.extend(_iter_prior_round_feedback_fragments(round_num))
     return query_fragments
 
 
-def _knowledge_query_tokens(task_id: str, round_num: int, task_card: TaskCard | None) -> set[str]:
-    query_tokens: set[str] = set()
-    for fragment in _knowledge_query_fragments(task_id, round_num, task_card):
-        query_tokens.update(_knowledge_tokens(fragment))
-    return query_tokens
+def _knowledge_query_tokens(task_id: str, round_num: int, task_card: TaskCard | None) -> dict[str, float]:
+    fragments = _knowledge_query_fragments(task_id, round_num, task_card)
+    freq_map: dict[str, int] = {}
+    for fragment in fragments:
+        for token in _knowledge_tokens(fragment):
+            freq_map[token] = freq_map.get(token, 0) + 1
+    if not freq_map:
+        return {}
+    max_freq = max(freq_map.values())
+    if max_freq <= 0:
+        return {}
+    return {token: min(1.0, freq / max_freq) for token, freq in freq_map.items()}
+
+
+def _parse_utc_iso8601_sort_key(value: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        return "0"
+    return value.strip()
 
 
 def _select_ranked_text_knowledge(
-    entries: list[str],
+    entries: list[str | dict[str, str]],
     *,
-    query_tokens: set[str],
+    query_token_weights: dict[str, float],
     cap: int,
 ) -> list[str]:
     if cap < 1:
         return []
-    ranked: list[tuple[int, int, str]] = []
+    ranked: list[tuple[float, int, str, str]] = []
     for index, value in enumerate(entries):
-        line = value.strip()
+        if isinstance(value, dict):
+            line = str(value.get("fact", value.get("pitfall", ""))).strip()
+            last_verified = str(value.get("last_verified", ""))
+        else:
+            line = str(value).strip()
+            last_verified = ""
         if not line:
             continue
-        ranked.append((_knowledge_score(line, query_tokens), index, line))
+        ranked.append((_knowledge_score(line, query_token_weights), index, line, last_verified))
     if not ranked:
         return []
-    matches = [item for item in ranked if item[0] >= _KNOWLEDGE_RETRIEVAL_MIN_SCORE]
+    matches = [item for item in ranked if item[0] > 0.0]
     if matches:
         matches.sort(key=lambda item: (-item[0], item[1], item[2]))
-        return [line for _, _, line in matches[:cap]]
+        return [line for _, _, line, _ in matches[:cap]]
     fallback_cap = min(cap, max(1, _KNOWLEDGE_RETRIEVAL_FALLBACK_CAP))
-    return [line for _, _, line in ranked[:fallback_cap]]
+    ranked.sort(key=lambda item: item[1])
+    ranked.sort(key=lambda item: _parse_utc_iso8601_sort_key(item[3]), reverse=True)
+    return [line for _, _, line, _ in ranked[:fallback_cap]]
 
 
 def _select_ranked_patterns(
     entries: list[dict],
     *,
-    query_tokens: set[str],
+    query_token_weights: dict[str, float],
     cap: int,
 ) -> list[str]:
     if cap < 1:
         return []
-    ranked: list[tuple[int, float, int, str]] = []
+    ranked: list[tuple[float, float, int, str, str]] = []
     for index, entry in enumerate(entries):
         confidence = _coerce_confidence(entry.get("confidence"), default=0.0)
         if confidence < PATTERN_HIGH_CONFIDENCE:
             continue
         line = _format_pattern_prompt_line(entry)
         searchable_text = f"{entry.get('category', '')} {entry.get('pattern', '')}"
-        ranked.append((_knowledge_score(searchable_text, query_tokens), confidence, index, line))
+        last_verified = str(entry.get("last_verified", ""))
+        ranked.append((_knowledge_score(searchable_text, query_token_weights), confidence, index, line, last_verified))
     if not ranked:
         return []
-    matches = [item for item in ranked if item[0] >= _KNOWLEDGE_RETRIEVAL_MIN_SCORE]
+    matches = [item for item in ranked if item[0] > 0.0]
     if matches:
         matches.sort(key=lambda item: (-item[0], -item[1], item[2], item[3]))
-        return [line for _, _, _, line in matches[:cap]]
+        return [line for _, _, _, line, _ in matches[:cap]]
     fallback_cap = min(cap, max(1, _KNOWLEDGE_RETRIEVAL_FALLBACK_CAP))
     ranked.sort(key=lambda item: (-item[1], item[2], item[3]))
-    return [line for _, _, _, line in ranked[:fallback_cap]]
+    ranked.sort(key=lambda item: _parse_utc_iso8601_sort_key(item[4]), reverse=True)
+    return [line for _, _, _, line, _ in ranked[:fallback_cap]]
 
 
 def _parse_utc_iso8601(value: object) -> datetime | None:
@@ -4698,12 +4806,13 @@ def cmd_knowledge_benchmark(query: str, iterations: int) -> None:
     if not normalized_query:
         raise ValidationError("query must be non-empty")
     query_tokens = _knowledge_tokens(normalized_query)
+    query_token_weights = {token: 1.0 for token in query_tokens}
     project_fact_entries = _load_project_facts()
     pitfall_entries = _load_pitfalls()
     patterns, _ = _load_patterns_with_governance(persist=False)
 
     _, _, _, warmup = _retrieve_ranked_knowledge(
-        query_tokens=query_tokens,
+        query_token_weights=query_token_weights,
         query_text=normalized_query,
         project_fact_entries=project_fact_entries,
         pitfall_entries=pitfall_entries,
@@ -4718,7 +4827,7 @@ def cmd_knowledge_benchmark(query: str, iterations: int) -> None:
     for _ in range(iterations):
         start = time.perf_counter()
         facts, pitfalls, selected_patterns, diag = _retrieve_ranked_knowledge(
-            query_tokens=query_tokens,
+            query_token_weights=query_token_weights,
             query_text=normalized_query,
             project_fact_entries=project_fact_entries,
             pitfall_entries=pitfall_entries,
@@ -4825,14 +4934,21 @@ def _format_pattern_prompt_line(entry: dict) -> str:
     return f"[{confidence:.2f}] ({category}) {pattern} (verified {last_verified})"
 
 
-def _render_knowledge_section(task_id: str, round_num: int, task_card: TaskCard | None, paths: LoopPaths | None = None) -> str:
+def _render_knowledge_section(
+    task_id: str,
+    round_num: int,
+    task_card: TaskCard | None,
+    paths: LoopPaths | None = None,
+    *,
+    max_tokens: int = _KNOWLEDGE_MAX_PROMPT_TOKENS,
+) -> str:
     project_fact_entries = _load_project_facts(paths=paths)
     pitfall_entries = _load_pitfalls(paths=paths)
     patterns, _ = _load_patterns_with_governance(persist=False, paths=paths)
     query_fragments = _knowledge_query_fragments(task_id, round_num, task_card)
-    query_tokens = _knowledge_query_tokens(task_id, round_num, task_card)
+    query_token_weights = _knowledge_query_tokens(task_id, round_num, task_card)
     selected_facts, selected_pitfalls, selected_patterns, _ = _retrieve_ranked_knowledge(
-        query_tokens=query_tokens,
+        query_token_weights=query_token_weights,
         query_text=" ".join(fragment for fragment in query_fragments if fragment).strip(),
         project_fact_entries=project_fact_entries,
         pitfall_entries=pitfall_entries,
@@ -4840,7 +4956,8 @@ def _render_knowledge_section(task_id: str, round_num: int, task_card: TaskCard 
     )
     if not selected_facts and not selected_pitfalls and not selected_patterns:
         return "- <none>"
-    return (
+    all_entries = list(selected_facts) + list(selected_pitfalls) + list(selected_patterns)
+    section = (
         "project_facts:\n"
         f"{_as_prompt_list(selected_facts)}\n\n"
         "active_pitfalls:\n"
@@ -4848,6 +4965,35 @@ def _render_knowledge_section(task_id: str, round_num: int, task_card: TaskCard 
         "high_confidence_patterns:\n"
         f"{_as_prompt_list(selected_patterns)}"
     )
+    token_count = len(section.split())
+    if token_count <= max_tokens:
+        return section
+    omitted = 0
+    while all_entries and len(section.split()) > max_tokens:
+        all_entries.pop()
+        omitted += 1
+        facts_end = len(selected_facts)
+        pitfalls_end = facts_end + len(selected_pitfalls)
+        remaining_facts = all_entries[:facts_end] if facts_end > 0 else []
+        remaining_pitfalls = (
+            all_entries[facts_end:pitfalls_end]
+            if pitfalls_end > facts_end
+            else []
+        )
+        remaining_patterns = all_entries[pitfalls_end:] if len(all_entries) > pitfalls_end else []
+        if not remaining_facts and not remaining_pitfalls and not remaining_patterns:
+            return "- <none>"
+        section = (
+            "project_facts:\n"
+            f"{_as_prompt_list(remaining_facts)}\n\n"
+            "active_pitfalls:\n"
+            f"{_as_prompt_list(remaining_pitfalls)}\n\n"
+            "high_confidence_patterns:\n"
+            f"{_as_prompt_list(remaining_patterns)}"
+        )
+    if omitted > 0:
+        section += f"\n(truncated: {omitted} entries omitted)"
+    return section
 
 
 _function_index_cache: tuple[tuple[int, float], str] | None = None
