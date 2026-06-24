@@ -98,19 +98,61 @@ All state is tracked in `.loop/`:
 ### Components
 
 ```
-                    ┌──────────┐
-                    │   PM     │  orchestrator.py
-                    │(outer)   │
-                    └────┬─────┘
-              ┌──────────┼──────────┐
-              ▼          ▼          ▼
-       ┌──────────┐ ┌──────────┐
-       │  Worker  │ │ Reviewer │   (codex/claude/opencode subprocess)
-       │(codex/   │ │(codex/   │
-       │claude/   │ │claude/   │
-       │opencode) │ │opencode) │
-       └──────────┘ └──────────┘
+                         ┌──────────────────────┐
+                         │   orchestrator.py     │  facade (re-exports)
+                         │   (public API)        │
+                         └──────────┬───────────┘
+              ┌─────────────────────┼─────────────────────┐
+              ▼                     ▼                     ▼
+     ┌────────────────┐   ┌────────────────┐   ┌────────────────┐
+     │ exceptions.py  │   │   paths.py     │   │   state.py     │
+     │ (leaf)         │   │   (leaf)       │   │ → exceptions,  │
+     │                │   │                │   │   paths        │
+     └────────────────┘   └────────────────┘   └────────────────┘
+     ┌────────────────┐   ┌────────────────┐   ┌────────────────┐
+     │ file_bus.py    │   │ dispatch.py    │   │ session.py     │
+     │ → exceptions,  │   │ → exceptions,  │   │ → exceptions,  │
+     │   paths        │   │   paths,       │   │   paths, state │
+     │                │   │   session      │   │                │
+     └────────────────┘   └────────────────┘   └────────────────┘
+     ┌────────────────┐   ┌────────────────┐   ┌────────────────┐
+     │ config.py      │   │ prompts.py     │   │ knowledge.py   │
+     │ → exceptions,  │   │ → paths,       │   │ → paths        │
+     │   paths        │   │   config       │   │                │
+     └────────────────┘   └────────────────┘   └────────────────┘
+     ┌────────────────┐   ┌────────────────┐
+     │ git_helpers.py │   │   _core.py     │
+     │ → exceptions,  │   │ (full impl,    │
+     │   paths        │   │  internal)     │
+     └────────────────┘   └────────────────┘
+
+                     ┌──────────┐
+                     │   PM     │  orchestrator (facade)
+                     │(outer)   │
+                     └────┬─────┘
+               ┌──────────┼──────────┐
+               ▼          ▼          ▼
+        ┌──────────┐ ┌──────────┐
+        │  Worker  │ │ Reviewer │   (codex/claude/opencode subprocess)
+        │(codex/   │ │(codex/   │
+        │claude/   │ │claude/   │
+        │opencode) │ │opencode) │
+        └──────────┘ └──────────┘
 ```
+
+**Module dependency DAG** (no circular imports):
+
+```
+exceptions (leaf) ──┐
+paths (leaf) ───────┤
+                    ├──→ state ──→ session ──→ dispatch
+                    ├──→ file_bus
+                    ├──→ config ──→ prompts
+                    ├──→ git_helpers
+                    └──→ knowledge ──→ prompts
+```
+
+`_core.py` contains the full implementation; each focused module re-exports its section's symbols from `_core`. The `orchestrator.py` facade re-exports from all modules and aliases `_core` via `sys.modules` to preserve test monkeypatching compatibility.
 
 ### File Bus Protocol
 
@@ -161,12 +203,12 @@ If a transition tries to persist forbidden residue (for example stale `error` on
 
 `loop status --dependency-map` prints a lightweight internal dependency map for critical orchestrator sections:
 
-- `dispatch`
-- `session`
-- `file-bus`
-- `state`
+- `dispatch` → `src/loop_kit/dispatch.py`
+- `session` → `src/loop_kit/session.py`
+- `file-bus` → `src/loop_kit/file_bus.py`
+- `state` → `src/loop_kit/state.py`
 
-The diagnostic includes owner symbols, upstream dependencies, and core contracts, plus an integrity line that flags missing symbols after refactors.
+The `_SECTION_OWNERSHIP_MAP` and `_SECTION_MODULE_PATHS` in `orchestrator.py` map section names to their owning module files. The diagnostic includes owner symbols, upstream dependencies, and core contracts, plus an integrity line that flags missing symbols after refactors.
 
 ### Integration Lane (Deterministic Merge V1)
 

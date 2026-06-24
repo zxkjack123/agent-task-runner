@@ -7,9 +7,22 @@
 
 ## Source Structure
 
-- All code stays in `src/loop_kit/orchestrator.py` (policy decision T-722). Do not split into modules unless this file and README Architecture are updated in the same change.
-- Internal boundaries are documented by `_SECTION_OWNERSHIP_MAP` in `orchestrator.py` and are treated as module-equivalent ownership contracts.
-- Wrappers: `cli.py` (re-exports main), `__main__.py` (`python -m loop_kit`), `__init__.py` (version).
+- `orchestrator.py` is a thin facade that re-exports all public symbols from focused sub-modules (T-722 modularization).
+- Follow the `_SECTION_OWNERSHIP_MAP` module boundaries when adding new code.
+- Module layout:
+  - `_core.py` — internal full implementation (do not import directly outside the package)
+  - `exceptions.py` — exception hierarchy (leaf module, no internal imports)
+  - `paths.py` — constants, `LoopPaths`, path helpers (leaf module)
+  - `state.py` — state machine, transitions, state I/O (imports from `exceptions`, `paths`)
+  - `file_bus.py` — prepare/archive/wait bus files, file locking
+  - `dispatch.py` — backend registration, agent commands, auto-dispatch, dispatch handler tables
+  - `session.py` — `SessionManager`, resume policy
+  - `config.py` — `RunConfig`, config loading and validation
+  - `prompts.py` — task packet rendering, worker/reviewer prompt templates
+  - `knowledge.py` — knowledge retrieval, FTS, patterns
+  - `git_helpers.py` — git operations, diff, worktree management
+- `_SECTION_OWNERSHIP_MAP` and `_SECTION_MODULE_PATHS` in `orchestrator.py` map section names to module file paths.
+- Wrappers: `cli.py` (imports `main` from `_core` directly), `__main__.py` (`python -m loop_kit`), `__init__.py` (version).
 - Tests in `tests/test_orchestrator.py`.
 
 ## Coding Constraints
@@ -34,5 +47,6 @@
 
 ```bash
 uv run python -m py_compile src/loop_kit/orchestrator.py
+uv run python -c "from loop_kit.orchestrator import *"
 uv run --group dev pytest
 ```
