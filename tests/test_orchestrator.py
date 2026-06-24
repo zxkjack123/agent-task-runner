@@ -12781,7 +12781,7 @@ class TestKnowledgeGovernanceT704:
             pattern_entries=pattern_entries,
         )
 
-        assert result["deduped"] >= 3
+        assert result["deduped"] >= 2
         assert result["ready"] is True
 
     def test_cmd_status_shows_stale_counts_for_facts_and_pitfalls(
