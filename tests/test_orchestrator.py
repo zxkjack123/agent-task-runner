@@ -12487,3 +12487,205 @@ class TestPatternDedupGuard:
         monkeypatch.setattr(orchestrator, "_log", lambda msg: warnings.append(msg))
         orchestrator._write_patterns_jsonl(entries)
         assert not any("duplicate" in w.lower() for w in warnings)
+
+
+# ── T-721: table-driven state machine dispatch table tests ─────────
+
+
+class TestRoundOutcomeEnum:
+    """Test _RoundOutcome enum string compatibility."""
+
+    def test_approved_value_is_string(self) -> None:
+        assert orchestrator._RoundOutcome.APPROVED.value == "approved"
+
+    def test_changes_required_value(self) -> None:
+        assert orchestrator._RoundOutcome.CHANGES_REQUIRED.value == "changes_required"
+
+    def test_no_change_success_value(self) -> None:
+        assert orchestrator._RoundOutcome.NO_CHANGE_SUCCESS.value == "no_change_success"
+
+    def test_worker_timeout_value(self) -> None:
+        assert orchestrator._RoundOutcome.WORKER_TIMEOUT.value == "worker_timeout"
+
+    def test_reviewer_timeout_value(self) -> None:
+        assert orchestrator._RoundOutcome.REVIEWER_TIMEOUT.value == "reviewer_timeout"
+
+    def test_max_rounds_exhausted_value(self) -> None:
+        assert orchestrator._RoundOutcome.MAX_ROUNDS_EXHAUSTED.value == "max_rounds_exhausted"
+
+    def test_terminal_error_value(self) -> None:
+        assert orchestrator._RoundOutcome.TERMINAL_ERROR.value == "terminal_error"
+
+    def test_invalid_transition_value(self) -> None:
+        assert orchestrator._RoundOutcome.INVALID_TRANSITION.value == "invalid_transition"
+
+    def test_all_members_present(self) -> None:
+        members = {m.name for m in orchestrator._RoundOutcome}
+        assert members == {
+            "APPROVED", "CHANGES_REQUIRED", "NO_CHANGE_SUCCESS",
+            "WORKER_TIMEOUT", "REVIEWER_TIMEOUT", "MAX_ROUNDS_EXHAUSTED",
+            "TERMINAL_ERROR", "INVALID_TRANSITION",
+        }
+
+
+class TestStateHandlersRegistry:
+    """Test _STATE_HANDLERS registry completeness."""
+
+    def test_all_states_have_handlers(self) -> None:
+        for state_name in orchestrator.STATE_DESCRIPTORS:
+            assert state_name in orchestrator._STATE_HANDLERS, f"Missing handler for state: {state_name}"
+
+    def test_handlers_are_callables(self) -> None:
+        for state_name, handler in orchestrator._STATE_HANDLERS.items():
+            assert callable(handler), f"Handler for {state_name} is not callable"
+
+    def test_idle_handler_is_run_multi_round(self) -> None:
+        assert orchestrator._STATE_HANDLERS[orchestrator.STATE_IDLE] is orchestrator._run_multi_round_via_subprocess
+
+    def test_awaiting_work_handler_is_run_single_round(self) -> None:
+        assert orchestrator._STATE_HANDLERS[orchestrator.STATE_AWAITING_WORK] is orchestrator._run_single_round
+
+    def test_awaiting_review_handler_is_run_single_round(self) -> None:
+        assert orchestrator._STATE_HANDLERS[orchestrator.STATE_AWAITING_REVIEW] is orchestrator._run_single_round
+
+    def test_done_handler_is_run_multi_round(self) -> None:
+        assert orchestrator._STATE_HANDLERS[orchestrator.STATE_DONE] is orchestrator._run_multi_round_via_subprocess
+
+
+class TestPostRoundDispatch:
+    """Test _POST_ROUND_DISPATCH table coverage."""
+
+    def test_dispatch_table_has_entries(self) -> None:
+        assert len(orchestrator._POST_ROUND_DISPATCH) >= 2
+
+    def test_terminal_success_condition(self) -> None:
+        state = {"state": orchestrator.STATE_DONE, "outcome": "approved"}
+        assert orchestrator._is_post_round_terminal_success(state, 1)
+
+    def test_terminal_success_condition_no_change(self) -> None:
+        state = {"state": orchestrator.STATE_DONE, "outcome": "no_change_success"}
+        assert orchestrator._is_post_round_terminal_success(state, 1)
+
+    def test_terminal_success_condition_not_done(self) -> None:
+        state = {"state": orchestrator.STATE_AWAITING_WORK, "outcome": "approved"}
+        assert not orchestrator._is_post_round_terminal_success(state, 1)
+
+    def test_terminal_success_condition_bad_outcome(self) -> None:
+        state = {"state": orchestrator.STATE_DONE, "outcome": "worker_timeout"}
+        assert not orchestrator._is_post_round_terminal_success(state, 1)
+
+    def test_awaiting_next_round_condition(self) -> None:
+        state = {"state": orchestrator.STATE_AWAITING_WORK, "round": 2}
+        assert orchestrator._is_post_round_awaiting_next(state, 1)
+
+    def test_awaiting_next_round_condition_wrong_round(self) -> None:
+        state = {"state": orchestrator.STATE_AWAITING_WORK, "round": 1}
+        assert not orchestrator._is_post_round_awaiting_next(state, 1)
+
+    def test_awaiting_next_round_condition_wrong_state(self) -> None:
+        state = {"state": orchestrator.STATE_DONE, "round": 2}
+        assert not orchestrator._is_post_round_awaiting_next(state, 1)
+
+    def test_dispatch_returns_terminal_success_handler(self) -> None:
+        state = {"state": orchestrator.STATE_DONE, "outcome": "approved"}
+        handler = orchestrator._dispatch_post_round(state, 1, orchestrator.STATE_DONE)
+        assert handler is orchestrator._post_round_handle_terminal_success
+
+    def test_dispatch_returns_awaiting_handler(self) -> None:
+        state = {"state": orchestrator.STATE_AWAITING_WORK, "round": 2}
+        handler = orchestrator._dispatch_post_round(state, 1, orchestrator.STATE_AWAITING_WORK)
+        assert handler is orchestrator._post_round_handle_awaiting_next_round
+
+    def test_dispatch_returns_fail_for_unknown(self) -> None:
+        state = {"state": orchestrator.STATE_IDLE, "outcome": None}
+        handler = orchestrator._dispatch_post_round(state, 1, orchestrator.STATE_IDLE)
+        assert handler is orchestrator._post_round_handle_fail
+
+    def test_dispatch_returns_fail_for_done_with_bad_outcome(self) -> None:
+        state = {"state": orchestrator.STATE_DONE, "outcome": "worker_timeout"}
+        handler = orchestrator._dispatch_post_round(state, 1, orchestrator.STATE_DONE)
+        assert handler is orchestrator._post_round_handle_fail
+
+
+class TestTerminalOutcomeHandlers:
+    """Test _TERMINAL_OUTCOME_HANDLERS coverage."""
+
+    def test_approved_maps_to_resume_success(self) -> None:
+        assert orchestrator._TERMINAL_OUTCOME_HANDLERS["approved"] is orchestrator._terminal_outcome_handle_resume_success
+
+    def test_no_change_success_maps_to_resume_success(self) -> None:
+        assert orchestrator._TERMINAL_OUTCOME_HANDLERS["no_change_success"] is orchestrator._terminal_outcome_handle_resume_success
+
+    def test_terminal_error_maps_to_error_handler(self) -> None:
+        assert orchestrator._TERMINAL_OUTCOME_HANDLERS["terminal_error"] is orchestrator._terminal_outcome_handle_error
+
+    def test_dispatch_terminal_outcome_success(self) -> None:
+        state = {"state": orchestrator.STATE_DONE, "outcome": "approved"}
+        handler = orchestrator._dispatch_terminal_outcome(state)
+        assert handler is orchestrator._terminal_outcome_handle_resume_success
+
+    def test_dispatch_terminal_outcome_failure(self) -> None:
+        state = {"state": orchestrator.STATE_DONE, "outcome": "worker_timeout"}
+        handler = orchestrator._dispatch_terminal_outcome(state)
+        assert handler is orchestrator._terminal_outcome_handle_resume_failure
+
+    def test_dispatch_terminal_outcome_unknown(self) -> None:
+        state = {"state": orchestrator.STATE_IDLE, "outcome": None}
+        handler = orchestrator._dispatch_terminal_outcome(state)
+        assert handler is orchestrator._terminal_outcome_handle_error
+
+    def test_dispatch_terminal_outcome_no_change(self) -> None:
+        state = {"state": orchestrator.STATE_DONE, "outcome": "no_change_success"}
+        handler = orchestrator._dispatch_terminal_outcome(state)
+        assert handler is orchestrator._terminal_outcome_handle_resume_success
+
+    def test_dispatch_terminal_outcome_terminal_error(self) -> None:
+        state = {"state": orchestrator.STATE_DONE, "outcome": "terminal_error"}
+        handler = orchestrator._dispatch_terminal_outcome(state)
+        assert handler is orchestrator._terminal_outcome_handle_error
+
+
+class TestSingleRoundPhaseHandlers:
+    """Test _SINGLE_ROUND_PHASE_HANDLERS coverage."""
+
+    def test_reviewer_approve_handler(self) -> None:
+        assert orchestrator._SINGLE_ROUND_PHASE_HANDLERS[("reviewer", "approve")] is orchestrator._single_round_handle_review_approved
+
+    def test_reviewer_changes_required_handler(self) -> None:
+        assert orchestrator._SINGLE_ROUND_PHASE_HANDLERS[("reviewer", "changes_required")] is orchestrator._single_round_handle_changes_required
+
+    def test_worker_no_change_handler(self) -> None:
+        assert orchestrator._SINGLE_ROUND_PHASE_HANDLERS[("worker", "no_change_success")] is orchestrator._single_round_handle_worker_noop
+
+    def test_dispatch_reviewer_approve(self) -> None:
+        handler = orchestrator._dispatch_single_round_phase("reviewer", "approve")
+        assert handler is orchestrator._single_round_handle_review_approved
+
+    def test_dispatch_reviewer_changes_required(self) -> None:
+        handler = orchestrator._dispatch_single_round_phase("reviewer", "changes_required")
+        assert handler is orchestrator._single_round_handle_changes_required
+
+    def test_dispatch_worker_no_change(self) -> None:
+        handler = orchestrator._dispatch_single_round_phase("worker", "no_change_success")
+        assert handler is orchestrator._single_round_handle_worker_noop
+
+    def test_dispatch_unknown_phase_returns_none(self) -> None:
+        handler = orchestrator._dispatch_single_round_phase("unknown", "approve")
+        assert handler is None
+
+    def test_dispatch_unknown_decision_returns_none(self) -> None:
+        handler = orchestrator._dispatch_single_round_phase("reviewer", "unknown")
+        assert handler is None
+
+
+class TestStateDescriptorHandlerField:
+    """Test that STATE_DESCRIPTORS has handler_fn field."""
+
+    def test_descriptor_has_handler_fn_field(self) -> None:
+        for name, desc in orchestrator.STATE_DESCRIPTORS.items():
+            assert hasattr(desc, "handler_fn"), f"{name} missing handler_fn"
+
+    def test_handler_string_preserved(self) -> None:
+        for name, desc in orchestrator.STATE_DESCRIPTORS.items():
+            assert isinstance(desc.handler, str), f"{name} handler is not str"
+            assert desc.handler, f"{name} handler is empty"

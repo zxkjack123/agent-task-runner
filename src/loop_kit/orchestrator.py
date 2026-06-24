@@ -45,6 +45,7 @@ import types
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from enum import Enum
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal, NotRequired, Required, TypedDict, cast
@@ -387,6 +388,20 @@ DEFAULT_WORKER_BACKEND = BACKEND_CODEX
 DEFAULT_REVIEWER_BACKEND = BACKEND_CODEX
 DEFAULT_DISPATCH_BACKEND = DISPATCH_BACKEND_NATIVE
 _TERMINAL_SUCCESS_OUTCOMES = frozenset({"approved", "no_change_success"})
+
+
+class _RoundOutcome(Enum):
+    APPROVED = "approved"
+    CHANGES_REQUIRED = "changes_required"
+    NO_CHANGE_SUCCESS = "no_change_success"
+    WORKER_TIMEOUT = "worker_timeout"
+    REVIEWER_TIMEOUT = "reviewer_timeout"
+    MAX_ROUNDS_EXHAUSTED = "max_rounds_exhausted"
+    TERMINAL_ERROR = "terminal_error"
+    INVALID_TRANSITION = "invalid_transition"
+
+
+_TERMINAL_OUTCOME_VALUES = frozenset(member.value for member in _RoundOutcome)
 DISPATCH_STREAM_POLL_SEC = 0.1
 _WAIT_SAFETY_CAP_SEC = 86400  # 24h absolute cap in _wait_for_file
 _SESSION_ROLES = ("worker", "reviewer")
@@ -5822,6 +5837,7 @@ TransitionKind = Literal[
 class _StateDescriptor:
     name: str
     handler: str
+    handler_fn: Callable[..., None] | None
     terminal: bool
     description: str
 
@@ -5843,24 +5859,28 @@ STATE_DESCRIPTORS: dict[str, _StateDescriptor] = {
     STATE_IDLE: _StateDescriptor(
         name=STATE_IDLE,
         handler="_run_multi_round_via_subprocess",
+        handler_fn=None,
         terminal=False,
         description="Loop has no active task contract.",
     ),
     STATE_AWAITING_WORK: _StateDescriptor(
         name=STATE_AWAITING_WORK,
         handler="_run_single_round(worker)",
+        handler_fn=None,
         terminal=False,
         description="Worker action required for the current round.",
     ),
     STATE_AWAITING_REVIEW: _StateDescriptor(
         name=STATE_AWAITING_REVIEW,
         handler="_run_single_round(reviewer)",
+        handler_fn=None,
         terminal=False,
         description="Reviewer action required for the current round.",
     ),
     STATE_DONE: _StateDescriptor(
         name=STATE_DONE,
         handler="_run_multi_round_via_subprocess(exit)",
+        handler_fn=None,
         terminal=True,
         description="Terminal state for approved/blocked/error outcomes.",
     ),
@@ -5957,6 +5977,13 @@ STATE_TRANSITIONS: dict[str, _StateTransitionRule] = {
         transition_kind=TRANSITION_KIND_ERROR,
     ),
 }
+
+# ── table-driven dispatch infrastructure ──────────────────────────
+# Forward-declared dispatch tables; populated after handler functions are defined.
+_STATE_HANDLERS: dict[str, Callable[..., None]] = {}
+_POST_ROUND_DISPATCH: dict[tuple[str, Callable[[dict, int], bool]], Callable[..., None]] = {}
+_TERMINAL_OUTCOME_HANDLERS: dict[str, Callable[..., None]] = {}
+_SINGLE_ROUND_PHASE_HANDLERS: dict[tuple[str, str], Callable[..., None]] = {}
 
 
 def _default_state(task_id: str | None = None, round_num: int = 0) -> dict:
@@ -10903,80 +10930,25 @@ def _run_single_round(
         work["head_sha"] = head_sha
         _atomic_write_json(resolved_paths.work_report, work)
     if head_sha == base_sha:
-        noop_message = (
-            "Worker reported no code changes after immutable ref resolution: "
-            f"head_sha == base_sha ({head_sha}). task_id={task_id} round={round_num}"
-        )
-        round_detail = {
-            "round": round_num,
-            "started_at": state.get("started_at"),
-            "worker_notes": work.get("notes", ""),
-            "tests_summary": _tests_summary(work.get("tests", [])),
-            "review_decision": "skipped_no_change",
-            "round_outcome": "validation_failure" if config.worker_noop_as_error else "no_change_success",
-        }
-        round_details = [
-            item
-            for item in state.get("round_details", [])
-            if not (isinstance(item, dict) and item.get("round") == round_num)
-        ]
-        round_details.append(round_detail)
-        state["round_details"] = round_details
-        if config.worker_noop_as_error:
-            _write_round_summary(
-                task_id=task_id,
-                run_id=run_id,
-                outcome="validation_failure",
-                round_num=round_num,
-                base_sha=base_sha,
-                head_sha=head_sha,
-                files_changed=cast(list[str], work.get("files_changed", [])),
-                review_non_blocking=[],
-                round_details=cast(list[dict], state.get("round_details", [])),
-                paths=resolved_paths,
-            )
-            _fail_single_round(
-                outcome="validation_failure",
-                message=noop_message,
-                exit_code=EXIT_VALIDATION_ERROR,
-            )
+        _noop_handler = _dispatch_single_round_phase("worker", "no_change_success")
+        if _noop_handler is not None:
+            try:
+                _noop_handler(
+                    state, work, task_id, round_num, run_id,
+                    base_sha, head_sha, config, paths=resolved_paths,
+                    cleanup_fn=_cleanup_lane_worktrees,
+                    archive_fn=_archive_single_round_state,
+                )
+            except ValidationError as _noop_err:
+                if config.worker_noop_as_error:
+                    _fail_single_round(
+                        outcome="validation_failure",
+                        message=str(_noop_err),
+                        exit_code=EXIT_VALIDATION_ERROR,
+                    )
+                    return
+                raise
             return
-
-        _apply_state_transition(
-            state,
-            trigger=STATE_TRIGGER_WORKER_NO_CHANGE_SUCCESS,
-            paths=resolved_paths,
-            updates={"head_sha": head_sha},
-            archive_before_save=_archive_single_round_state,
-        )
-        _write_task_card_status(config.task_path, TASK_STATUS_DONE, paths=resolved_paths)
-        _write_round_summary(
-            task_id=task_id,
-            run_id=run_id,
-            outcome="no_change_success",
-            round_num=round_num,
-            base_sha=base_sha,
-            head_sha=head_sha,
-            files_changed=cast(list[str], work.get("files_changed", [])),
-            review_non_blocking=[],
-            round_details=cast(list[dict], state.get("round_details", [])),
-            paths=resolved_paths,
-        )
-        _archive_task_summary(task_id, paths=resolved_paths)
-        _feed_event(
-            FEED_ROUND_COMPLETE,
-            data=_feed_data(
-                task_id=task_id,
-                round_num=round_num,
-                role="orchestrator",
-                decision="skipped_no_change",
-                outcome="no_change_success",
-            ),
-        )
-        _log(f"No-change success accepted. head_sha={head_sha}")
-        print(f"  Worker no-change success: {head_sha[:8]}")
-        _cleanup_lane_worktrees()
-        return
 
     try:
         raw_diff = _diff(base_sha, head_sha)
@@ -11132,96 +11104,23 @@ def _run_single_round(
     _atomic_write_json(resolved_paths.work_report, work)
     _atomic_write_json(resolved_paths.review_report, review)
 
-    if decision == "approve":
-        try:
-            _update_knowledge_on_approval(task_id, round_num, run_id=run_id, paths=resolved_paths)
-        except OSError as e:
-            _log(f"Warning: failed to update knowledge context on approval: {e}")
-        _apply_state_transition(
-            state,
-            trigger=STATE_TRIGGER_REVIEWER_APPROVED,
-            paths=resolved_paths,
-            archive_before_save=_archive_single_round_state,
+    _phase_handler = _dispatch_single_round_phase("reviewer", decision)
+    if _phase_handler is not None:
+        _phase_handler(
+            state, work, review, task_id, round_num, run_id,
+            base_sha, head_sha, config, paths=resolved_paths,
+            cleanup_fn=_cleanup_lane_worktrees,
+            archive_fn=_archive_single_round_state,
         )
-        _write_task_card_status(config.task_path, TASK_STATUS_DONE, paths=resolved_paths)
-        print(f"\n{'=' * 60}")
-        print(f"  APPROVED at round {round_num}")
-        print(f"  base: {base_sha[:8]}  head: {head_sha[:8]}")
-        print(f"{'=' * 60}")
-
-        _write_round_summary(
-            task_id=task_id,
-            run_id=run_id,
-            outcome="approved",
-            round_num=round_num,
-            base_sha=base_sha,
-            head_sha=head_sha,
-            files_changed=cast(list[str], work.get("files_changed", [])),
-            review_non_blocking=cast(list[str], review.get("non_blocking_suggestions", [])),
-            round_details=cast(list[dict], state.get("round_details", [])),
-            paths=resolved_paths,
-        )
-        _archive_task_summary(task_id, paths=resolved_paths)
-        _log("Task approved. Summary written to .loop/summary.json")
-        _feed_event(
-            FEED_ROUND_COMPLETE,
-            data=_feed_data(
-                task_id=task_id,
-                round_num=round_num,
-                role="orchestrator",
-                decision=decision,
-                outcome="approved",
-            ),
-        )
-        _cleanup_lane_worktrees()
+        if _phase_handler is _single_round_handle_review_approved:
+            return
         return
-
-    raw_blocking = review.get("blocking_issues", [])
-    blocking = raw_blocking if isinstance(raw_blocking, list) else []
-    blocking_items = cast(list[ReviewIssue], [item for item in blocking if isinstance(item, dict)])
-    fix_list: FixList = {
-        "task_id": task_id,
-        "run_id": run_id,
-        "round": round_num + 1,
-        "base_sha": base_sha,
-        "head_sha": head_sha,
-        "fixes": blocking_items,
-        "prior_round_notes": work.get("notes", ""),
-        "prior_review_non_blocking": review.get("non_blocking_suggestions", []),
-    }
-    _archive_bus_file(resolved_paths.fix_list, task_id, round_num, "fix_list")
-    resolved_paths.fix_list.write_text(
-        json.dumps(fix_list, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
+    _single_round_handle_changes_required(
+        state, work, review, task_id, round_num, run_id,
+        base_sha, head_sha, config, paths=resolved_paths,
+        cleanup_fn=_cleanup_lane_worktrees,
+        archive_fn=_archive_single_round_state,
     )
-    _prepare_bus_file(resolved_paths.work_report, task_id, round_num, "work_report", run_id=run_id)
-
-    _print_blocking_issues(blocking_items)
-    print(f"  Fix list written to {resolved_paths.fix_list}")
-    _feed_event(
-        FEED_ROUND_COMPLETE,
-        data=_feed_data(
-            task_id=task_id,
-            round_num=round_num,
-            role="orchestrator",
-            decision=decision,
-            outcome="changes_required",
-            next_round=round_num + 1,
-        ),
-    )
-
-    retry_updates: dict[str, object] = {"round_details": cast(list[dict], state.get("round_details", []))}
-    retry_head_sha = str(state.get("head_sha", "")).strip()
-    if retry_head_sha:
-        retry_updates["head_sha"] = retry_head_sha
-    _apply_state_transition(
-        state,
-        trigger=STATE_TRIGGER_REVIEWER_CHANGES_REQUIRED,
-        paths=resolved_paths,
-        updates=retry_updates,
-        archive_before_save=_archive_single_round_state,
-    )
-    _cleanup_lane_worktrees()
 
 
 def _run_multi_round_via_subprocess(
@@ -11473,43 +11372,20 @@ def _run_multi_round_via_subprocess(
                 return
 
             outcome = state.get("outcome")
-            if normalized_state_name == STATE_DONE and outcome in _TERMINAL_SUCCESS_OUTCOMES:
-                _write_task_card_status(config.task_path, TASK_STATUS_DONE, paths=resolved_paths)
-                _archive_task_summary(task_id, paths=resolved_paths)
-                _log(f"Task terminal success via state contract at round={round_num} outcome={outcome!r}")
-                return
-
-            if normalized_state_name == STATE_AWAITING_WORK and state.get("round") == round_num + 1:
-                last_decision = "changes_required"
-                if (
-                    fix_list is not None
-                    and fix_list.get("task_id") == task_id
-                    and fix_list.get("run_id") == run_id
-                    and fix_list.get("round") == round_num + 1
-                ):
-                    blocking = fix_list.get("fixes", [])
-                    _print_blocking_issues(blocking)
-                else:
-                    _log(
-                        "State indicates changes_required, but fix_list.json is missing/stale; "
-                        "continuing based on state.json contract."
-                    )
-                if review is not None:
-                    decision = review.get("decision")
-                    if decision not in (None, "changes_required"):
-                        _log(f"Ignoring stale review_report decision={decision!r}; state.json is authoritative.")
-                continue
-
-            _fail_with_state(
-                state,
-                outcome="invalid_state_transition",
-                message=(
-                    "single-round subprocess exited 0 but did not produce a valid state transition: "
-                    f"state={state.get('state')!r} outcome={state.get('outcome')!r} round={state.get('round')!r}"
-                ),
-                exit_code=EXIT_VALIDATION_ERROR,
-                task_path=config.task_path,
+            _post_round_handler = _dispatch_post_round(
+                state, round_num, normalized_state_name
             )
+            if _post_round_handler is _post_round_handle_terminal_success:
+                _post_round_handler(state, round_num, task_id, config, paths=resolved_paths)
+                return
+            if _post_round_handler is _post_round_handle_awaiting_next_round:
+                _should_continue = _post_round_handler(
+                    state, round_num, task_id, config, paths=resolved_paths,
+                    fix_list=fix_list, review=review, run_id=run_id,
+                )
+                if _should_continue:
+                    continue
+            _post_round_handle_fail(state, round_num, task_id, config, paths=resolved_paths)
             return
     finally:
         if current_proc is not None and current_proc.poll() is None:
@@ -11634,25 +11510,12 @@ def cmd_run(
             resume_state: dict | None = None
             if resume:
                 resume_state = _load_state(paths=resolved_paths)
-                outcome = resume_state.get("outcome")
-                state_name = _normalized_state_name_from_persisted(resume_state)
-                if state_name == STATE_DONE and outcome in _TERMINAL_SUCCESS_OUTCOMES:
-                    _write_task_card_status(config.task_path, TASK_STATUS_DONE, paths=resolved_paths)
-                    print(
-                        "Resume not needed: state.json already marked terminal success "
-                        f"(outcome={outcome!r}) for task_id={resume_state.get('task_id')!r}."
-                    )
+                _resume_handler = _dispatch_terminal_outcome(resume_state)
+                if _resume_handler is _terminal_outcome_handle_resume_success:
+                    _resume_handler(resume_state, config, paths=resolved_paths)
                     return
-                if state_name == STATE_DONE and outcome not in _TERMINAL_SUCCESS_OUTCOMES:
-                    _write_task_card_status(config.task_path, TASK_STATUS_BLOCKED, paths=resolved_paths)
-                    error_text = resume_state.get("error") or "<no error details in state.json>"
-                    print(
-                        "Error: cannot resume because state.json indicates a failed run: "
-                        f"outcome={outcome!r} error={error_text}",
-                        file=sys.stderr,
-                    )
-                    print("Re-run without --resume to start a fresh run.", file=sys.stderr)
-                    raise ValidationError(f"Cannot resume from failed state: {outcome}")
+                if _resume_handler is _terminal_outcome_handle_resume_failure:
+                    _resume_handler(resume_state, config, paths=resolved_paths)
 
             _main_loop(
                 config=config,
@@ -11678,6 +11541,410 @@ def cmd_run(
         sys.exit(EXIT_GENERAL_ERROR)
     except LoopKitError:
         sys.exit(EXIT_GENERAL_ERROR)
+
+
+# ── table-driven dispatch handler functions ────────────────────────
+
+def _post_round_handle_terminal_success(
+    state: dict,
+    round_num: int,
+    task_id: str,
+    config: RunConfig,
+    paths: LoopPaths | None = None,
+) -> None:
+    resolved_paths = _resolve_paths(paths)
+    outcome = state.get("outcome")
+    _write_task_card_status(config.task_path, TASK_STATUS_DONE, paths=resolved_paths)
+    _archive_task_summary(task_id, paths=resolved_paths)
+    _log(f"Task terminal success via state contract at round={round_num} outcome={outcome!r}")
+
+
+def _post_round_handle_awaiting_next_round(
+    state: dict,
+    round_num: int,
+    task_id: str,
+    config: RunConfig,
+    paths: LoopPaths | None = None,
+    *,
+    fix_list: FixList | None = None,
+    review: ReviewReport | None = None,
+    run_id: str = "",
+) -> bool:
+    resolved_paths = _resolve_paths(paths)
+    last_decision = "changes_required"
+    if (
+        fix_list is not None
+        and fix_list.get("task_id") == task_id
+        and fix_list.get("run_id") == run_id
+        and fix_list.get("round") == round_num + 1
+    ):
+        blocking = fix_list.get("fixes", [])
+        _print_blocking_issues(blocking)
+    else:
+        _log(
+            "State indicates changes_required, but fix_list.json is missing/stale; "
+            "continuing based on state.json contract."
+        )
+    if review is not None:
+        decision = review.get("decision")
+        if decision not in (None, "changes_required"):
+            _log(f"Ignoring stale review_report decision={decision!r}; state.json is authoritative.")
+    return True
+
+
+def _post_round_handle_fail(
+    state: dict,
+    round_num: int,
+    task_id: str,
+    config: RunConfig,
+    paths: LoopPaths | None = None,
+) -> None:
+    resolved_paths = _resolve_paths(paths)
+    _fail_with_state(
+        state,
+        outcome="invalid_state_transition",
+        message=(
+            "single-round subprocess exited 0 but did not produce a valid state transition: "
+            f"state={state.get('state')!r} outcome={state.get('outcome')!r} round={state.get('round')!r}"
+        ),
+        exit_code=EXIT_VALIDATION_ERROR,
+        task_path=config.task_path,
+        paths=resolved_paths,
+    )
+
+
+def _terminal_outcome_handle_resume_success(
+    state: dict,
+    config: RunConfig,
+    paths: LoopPaths | None = None,
+) -> None:
+    resolved_paths = _resolve_paths(paths)
+    outcome = state.get("outcome")
+    _write_task_card_status(config.task_path, TASK_STATUS_DONE, paths=resolved_paths)
+    print(
+        "Resume not needed: state.json already marked terminal success "
+        f"(outcome={outcome!r}) for task_id={state.get('task_id')!r}."
+    )
+
+
+def _terminal_outcome_handle_resume_failure(
+    state: dict,
+    config: RunConfig,
+    paths: LoopPaths | None = None,
+) -> None:
+    resolved_paths = _resolve_paths(paths)
+    outcome = state.get("outcome")
+    _write_task_card_status(config.task_path, TASK_STATUS_BLOCKED, paths=resolved_paths)
+    error_text = state.get("error") or "<no error details in state.json>"
+    print(
+        "Error: cannot resume because state.json indicates a failed run: "
+        f"outcome={outcome!r} error={error_text}",
+        file=sys.stderr,
+    )
+    print("Re-run without --resume to start a fresh run.", file=sys.stderr)
+    raise ValidationError(f"Cannot resume from failed state: {outcome}")
+
+
+def _terminal_outcome_handle_error(
+    state: dict,
+    config: RunConfig,
+    paths: LoopPaths | None = None,
+) -> None:
+    resolved_paths = _resolve_paths(paths)
+    outcome = state.get("outcome", "unknown")
+    _write_task_card_status(config.task_path, TASK_STATUS_BLOCKED, paths=resolved_paths)
+    error_text = state.get("error") or "<no error details in state.json>"
+    print(
+        f"Error: cannot resume from terminal error state: outcome={outcome!r} error={error_text}",
+        file=sys.stderr,
+    )
+    raise ValidationError(f"Cannot resume from terminal error state: {outcome}")
+
+
+def _single_round_handle_worker_noop(
+    state: dict,
+    work: WorkReport,
+    task_id: str,
+    round_num: int,
+    run_id: str,
+    base_sha: str,
+    head_sha: str,
+    config: RunConfig,
+    paths: LoopPaths | None = None,
+    cleanup_fn: Callable[[], None] | None = None,
+    archive_fn: Callable[[], None] | None = None,
+) -> None:
+    resolved_paths = _resolve_paths(paths)
+    noop_message = (
+        "Worker reported no code changes after immutable ref resolution: "
+        f"head_sha == base_sha ({head_sha}). task_id={task_id} round={round_num}"
+    )
+    round_detail = {
+        "round": round_num,
+        "started_at": state.get("started_at"),
+        "worker_notes": work.get("notes", ""),
+        "tests_summary": _tests_summary(work.get("tests", [])),
+        "review_decision": "skipped_no_change",
+        "round_outcome": "validation_failure" if config.worker_noop_as_error else "no_change_success",
+    }
+    round_details = [
+        item
+        for item in state.get("round_details", [])
+        if not (isinstance(item, dict) and item.get("round") == round_num)
+    ]
+    round_details.append(round_detail)
+    state["round_details"] = round_details
+    if config.worker_noop_as_error:
+        _write_round_summary(
+            task_id=task_id,
+            run_id=run_id,
+            outcome="validation_failure",
+            round_num=round_num,
+            base_sha=base_sha,
+            head_sha=head_sha,
+            files_changed=cast(list[str], work.get("files_changed", [])),
+            review_non_blocking=[],
+            round_details=cast(list[dict], state.get("round_details", [])),
+            paths=resolved_paths,
+        )
+        raise ValidationError(noop_message)
+
+    _apply_state_transition(
+        state,
+        trigger=STATE_TRIGGER_WORKER_NO_CHANGE_SUCCESS,
+        paths=resolved_paths,
+        updates={"head_sha": head_sha},
+        archive_before_save=archive_fn,
+    )
+    _write_task_card_status(config.task_path, TASK_STATUS_DONE, paths=resolved_paths)
+    _write_round_summary(
+        task_id=task_id,
+        run_id=run_id,
+        outcome="no_change_success",
+        round_num=round_num,
+        base_sha=base_sha,
+        head_sha=head_sha,
+        files_changed=cast(list[str], work.get("files_changed", [])),
+        review_non_blocking=[],
+        round_details=cast(list[dict], state.get("round_details", [])),
+        paths=resolved_paths,
+    )
+    _archive_task_summary(task_id, paths=resolved_paths)
+    _feed_event(
+        FEED_ROUND_COMPLETE,
+        data=_feed_data(
+            task_id=task_id,
+            round_num=round_num,
+            role="orchestrator",
+            decision="skipped_no_change",
+            outcome="no_change_success",
+        ),
+    )
+    _log(f"No-change success accepted. head_sha={head_sha}")
+    print(f"  Worker no-change success: {head_sha[:8]}")
+    if cleanup_fn is not None:
+        cleanup_fn()
+
+
+def _single_round_handle_review_approved(
+    state: dict,
+    work: WorkReport,
+    review: ReviewReport,
+    task_id: str,
+    round_num: int,
+    run_id: str,
+    base_sha: str,
+    head_sha: str,
+    config: RunConfig,
+    paths: LoopPaths | None = None,
+    cleanup_fn: Callable[[], None] | None = None,
+    archive_fn: Callable[[], None] | None = None,
+) -> None:
+    resolved_paths = _resolve_paths(paths)
+    decision = str(review["decision"])
+    try:
+        _update_knowledge_on_approval(task_id, round_num, run_id=run_id, paths=resolved_paths)
+    except OSError as e:
+        _log(f"Warning: failed to update knowledge context on approval: {e}")
+    _apply_state_transition(
+        state,
+        trigger=STATE_TRIGGER_REVIEWER_APPROVED,
+        paths=resolved_paths,
+        archive_before_save=archive_fn,
+    )
+    _write_task_card_status(config.task_path, TASK_STATUS_DONE, paths=resolved_paths)
+    print(f"\n{'=' * 60}")
+    print(f"  APPROVED at round {round_num}")
+    print(f"  base: {base_sha[:8]}  head: {head_sha[:8]}")
+    print(f"{'=' * 60}")
+    _write_round_summary(
+        task_id=task_id,
+        run_id=run_id,
+        outcome="approved",
+        round_num=round_num,
+        base_sha=base_sha,
+        head_sha=head_sha,
+        files_changed=cast(list[str], work.get("files_changed", [])),
+        review_non_blocking=cast(list[str], review.get("non_blocking_suggestions", [])),
+        round_details=cast(list[dict], state.get("round_details", [])),
+        paths=resolved_paths,
+    )
+    _archive_task_summary(task_id, paths=resolved_paths)
+    _log("Task approved. Summary written to .loop/summary.json")
+    _feed_event(
+        FEED_ROUND_COMPLETE,
+        data=_feed_data(
+            task_id=task_id,
+            round_num=round_num,
+            role="orchestrator",
+            decision=decision,
+            outcome="approved",
+        ),
+    )
+    if cleanup_fn is not None:
+        cleanup_fn()
+
+
+def _single_round_handle_changes_required(
+    state: dict,
+    work: WorkReport,
+    review: ReviewReport,
+    task_id: str,
+    round_num: int,
+    run_id: str,
+    base_sha: str,
+    head_sha: str,
+    config: RunConfig,
+    paths: LoopPaths | None = None,
+    cleanup_fn: Callable[[], None] | None = None,
+    archive_fn: Callable[[], None] | None = None,
+) -> None:
+    resolved_paths = _resolve_paths(paths)
+    decision = str(review["decision"])
+    raw_blocking = review.get("blocking_issues", [])
+    blocking = raw_blocking if isinstance(raw_blocking, list) else []
+    blocking_items = cast(list[ReviewIssue], [item for item in blocking if isinstance(item, dict)])
+    fix_list: FixList = {
+        "task_id": task_id,
+        "run_id": run_id,
+        "round": round_num + 1,
+        "base_sha": base_sha,
+        "head_sha": head_sha,
+        "fixes": blocking_items,
+        "prior_round_notes": work.get("notes", ""),
+        "prior_review_non_blocking": review.get("non_blocking_suggestions", []),
+    }
+    _archive_bus_file(resolved_paths.fix_list, task_id, round_num, "fix_list")
+    resolved_paths.fix_list.write_text(
+        json.dumps(fix_list, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    _prepare_bus_file(resolved_paths.work_report, task_id, round_num, "work_report", run_id=run_id)
+    _print_blocking_issues(blocking_items)
+    print(f"  Fix list written to {resolved_paths.fix_list}")
+    _feed_event(
+        FEED_ROUND_COMPLETE,
+        data=_feed_data(
+            task_id=task_id,
+            round_num=round_num,
+            role="orchestrator",
+            decision=decision,
+            outcome="changes_required",
+            next_round=round_num + 1,
+        ),
+    )
+    retry_updates: dict[str, object] = {"round_details": cast(list[dict], state.get("round_details", []))}
+    retry_head_sha = str(state.get("head_sha", "")).strip()
+    if retry_head_sha:
+        retry_updates["head_sha"] = retry_head_sha
+    _apply_state_transition(
+        state,
+        trigger=STATE_TRIGGER_REVIEWER_CHANGES_REQUIRED,
+        paths=resolved_paths,
+        updates=retry_updates,
+        archive_before_save=archive_fn,
+    )
+    if cleanup_fn is not None:
+        cleanup_fn()
+
+
+# ── dispatch table population ─────────────────────────────────────
+
+def _dispatch_post_round(
+    state: dict,
+    round_num: int,
+    normalized_state_name: str,
+) -> Callable[..., None]:
+    for (state_name, condition_fn), handler_fn in _POST_ROUND_DISPATCH.items():
+        if state_name == normalized_state_name and condition_fn(state, round_num):
+            return handler_fn
+    return _post_round_handle_fail
+
+
+def _dispatch_terminal_outcome(state: dict) -> Callable[..., None]:
+    outcome = state.get("outcome")
+    if outcome is not None:
+        handler = _TERMINAL_OUTCOME_HANDLERS.get(outcome)
+        if handler is not None:
+            return handler
+    normalized = _normalized_state_name_from_persisted(state)
+    if normalized == STATE_DONE and outcome in _TERMINAL_SUCCESS_OUTCOMES:
+        return _terminal_outcome_handle_resume_success
+    if normalized == STATE_DONE and outcome not in _TERMINAL_SUCCESS_OUTCOMES:
+        return _terminal_outcome_handle_resume_failure
+    return _terminal_outcome_handle_error
+
+
+def _dispatch_single_round_phase(
+    phase: str,
+    decision: str,
+) -> Callable[..., None] | None:
+    return _SINGLE_ROUND_PHASE_HANDLERS.get((phase, decision))
+
+
+def _is_post_round_terminal_success(state: dict, round_num: int) -> bool:
+    normalized = _normalized_state_name_from_persisted(state)
+    return normalized == STATE_DONE and state.get("outcome") in _TERMINAL_SUCCESS_OUTCOMES
+
+
+def _is_post_round_awaiting_next(state: dict, round_num: int) -> bool:
+    normalized = _normalized_state_name_from_persisted(state)
+    return normalized == STATE_AWAITING_WORK and state.get("round") == round_num + 1
+
+
+def _is_terminal_resume_success(state: dict, round_num: int) -> bool:
+    normalized = _normalized_state_name_from_persisted(state)
+    return normalized == STATE_DONE and state.get("outcome") in _TERMINAL_SUCCESS_OUTCOMES
+
+
+def _is_terminal_resume_failure(state: dict, round_num: int) -> bool:
+    normalized = _normalized_state_name_from_persisted(state)
+    return normalized == STATE_DONE and state.get("outcome") not in _TERMINAL_SUCCESS_OUTCOMES
+
+
+_STATE_HANDLERS.update({
+    STATE_IDLE: _run_multi_round_via_subprocess,
+    STATE_AWAITING_WORK: _run_single_round,
+    STATE_AWAITING_REVIEW: _run_single_round,
+    STATE_DONE: _run_multi_round_via_subprocess,
+})
+
+_POST_ROUND_DISPATCH.update({
+    (STATE_DONE, _is_post_round_terminal_success): _post_round_handle_terminal_success,
+    (STATE_AWAITING_WORK, _is_post_round_awaiting_next): _post_round_handle_awaiting_next_round,
+})
+
+_TERMINAL_OUTCOME_HANDLERS.update({
+    "approved": _terminal_outcome_handle_resume_success,
+    "no_change_success": _terminal_outcome_handle_resume_success,
+    "terminal_error": _terminal_outcome_handle_error,
+})
+
+_SINGLE_ROUND_PHASE_HANDLERS.update({
+    ("reviewer", "approve"): _single_round_handle_review_approved,
+    ("reviewer", "changes_required"): _single_round_handle_changes_required,
+    ("worker", "no_change_success"): _single_round_handle_worker_noop,
+})
 
 
 # ── CLI ─────────────────────────────────────────────────────────────
