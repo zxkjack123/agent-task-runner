@@ -10,6 +10,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import time
 import types
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -12830,3 +12831,276 @@ class TestKnowledgeGovernanceT704:
     def test_knowledge_stale_prune_days_constant_exists(self) -> None:
         assert hasattr(orchestrator, "_KNOWLEDGE_STALE_PRUNE_DAYS")
         assert orchestrator._KNOWLEDGE_STALE_PRUNE_DAYS == 90
+
+
+# ── _LoopLock concurrent execution safety tests ─────────────────────
+
+
+def test_lock_concurrent_acquisition_second_thread_fails(tmp_path: Path) -> None:
+    """Two threads attempt to acquire _LoopLock on the same file; second gets RuntimeError."""
+    lock_path = tmp_path / ".loop" / "lock"
+    first_acquired = threading.Event()
+    release_first = threading.Event()
+    errors: list[str] = []
+
+    def holder() -> None:
+        lock = orchestrator._LoopLock(lock_path)
+        try:
+            lock.acquire()
+            first_acquired.set()
+            release_first.wait(10)
+        finally:
+            lock.release()
+
+    def contender() -> None:
+        if not first_acquired.wait(5):
+            errors.append("holder never acquired lock")
+            return
+        second_lock = orchestrator._LoopLock(lock_path)
+        try:
+            second_lock.acquire()
+            errors.append("contender unexpectedly acquired lock")
+        except RuntimeError as exc:
+            if "already running" not in str(exc):
+                errors.append(f"wrong error message: {exc}")
+        finally:
+            try:
+                second_lock.release()
+            except Exception:
+                pass
+
+    holder_thread = threading.Thread(target=holder)
+    contender_thread = threading.Thread(target=contender)
+    holder_thread.start()
+    contender_thread.start()
+    contender_thread.join(10)
+    release_first.set()
+    holder_thread.join(10)
+
+    assert not holder_thread.is_alive()
+    assert not contender_thread.is_alive()
+    assert not errors, f"unexpected errors: {errors}"
+    lock_path.unlink(missing_ok=True)
+
+
+def test_lock_release_then_reacquire(tmp_path: Path) -> None:
+    """After first thread releases, second thread can acquire successfully."""
+    lock_path = tmp_path / ".loop" / "lock"
+    first_lock = orchestrator._LoopLock(lock_path)
+    first_lock.acquire()
+    first_lock.release()
+
+    second_lock = orchestrator._LoopLock(lock_path)
+    second_lock.acquire()
+    assert second_lock._handle is not None
+    second_lock.release()
+    assert second_lock._handle is None
+    lock_path.unlink(missing_ok=True)
+
+
+def test_lock_context_manager_enter_exit(tmp_path: Path) -> None:
+    """_LoopLock used as context manager — __enter__/__exit__ path."""
+    lock_path = tmp_path / ".loop" / "lock"
+    lock = orchestrator._LoopLock(lock_path)
+    with lock:
+        assert lock._handle is not None
+        assert not lock._handle.closed
+    assert lock._handle is None
+    lock_path.unlink(missing_ok=True)
+
+
+def test_lock_context_manager_releases_on_exception(tmp_path: Path) -> None:
+    """Context manager releases lock even when an exception is raised inside the block."""
+    lock_path = tmp_path / ".loop" / "lock"
+    lock = orchestrator._LoopLock(lock_path)
+
+    with pytest.raises(ValueError, match="boom"):
+        with lock:
+            assert lock._handle is not None
+            raise ValueError("boom")
+
+    assert lock._handle is None
+
+    # Lock should be available again
+    second_lock = orchestrator._LoopLock(lock_path)
+    second_lock.acquire()
+    second_lock.release()
+    lock_path.unlink(missing_ok=True)
+
+
+def test_lock_file_creation_and_parent_dir(tmp_path: Path) -> None:
+    """Verify lock file is created in the correct path and parent directory is created if missing."""
+    lock_path = tmp_path / "deep" / "nested" / "dir" / "lock"
+    assert not lock_path.parent.exists()
+
+    lock = orchestrator._LoopLock(lock_path)
+    lock.acquire()
+
+    assert lock_path.exists(), "lock file should be created"
+    assert lock_path.parent.exists(), "parent directory should be created"
+    assert lock._handle is not None
+
+    lock.release()
+    # Lock file may remain after release — that's acceptable per cleanup criteria
+    assert lock._handle is None
+    lock_path.unlink(missing_ok=True)
+
+
+def test_lock_cross_platform_windows_msvcrt_mock(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Mock os.name == 'nt' and msvcrt module to verify Windows locking path."""
+    fake_msvcrt = types.ModuleType("msvcrt")
+    calls: list[tuple[int, int, int]] = []
+
+    def _fake_locking(fd: int, mode: int, nbytes: int) -> None:
+        calls.append((fd, mode, nbytes))
+
+    fake_msvcrt.LK_NBLCK = 1
+    fake_msvcrt.LK_UNLCK = 2
+    fake_msvcrt.locking = _fake_locking
+
+    monkeypatch.setattr(os, "name", "nt")
+    monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+    # Inject msvcrt into the orchestrator (_core) module namespace
+    monkeypatch.setattr(orchestrator, "msvcrt", fake_msvcrt, raising=False)
+
+    lock_path = tmp_path / ".loop" / "lock"
+    lock = orchestrator._LoopLock(lock_path)
+    lock.acquire()
+
+    assert len(calls) == 1, f"expected 1 lock call, got {calls}"
+    assert calls[0][1] == fake_msvcrt.LK_NBLCK
+    assert calls[0][2] == 1
+
+    lock.release()
+
+    assert len(calls) == 2, f"expected 2 calls (lock+unlock), got {calls}"
+    assert calls[1][1] == fake_msvcrt.LK_UNLCK
+    assert calls[1][2] == 1
+    lock_path.unlink(missing_ok=True)
+
+
+def test_lock_cross_platform_unix_fcntl_mock(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Mock os.name == 'posix' and fcntl module to verify Unix locking path."""
+    fake_fcntl = types.ModuleType("fcntl")
+    calls: list[tuple[int, int]] = []
+
+    def _fake_flock(fd: int, operation: int) -> None:
+        calls.append((fd, operation))
+
+    fake_fcntl.LOCK_EX = 2
+    fake_fcntl.LOCK_NB = 4
+    fake_fcntl.LOCK_UN = 8
+    fake_fcntl.flock = _fake_flock
+
+    monkeypatch.setattr(os, "name", "posix")
+    monkeypatch.setattr(orchestrator, "fcntl", fake_fcntl, raising=False)
+
+    lock_path = tmp_path / ".loop" / "lock"
+    lock = orchestrator._LoopLock(lock_path)
+    lock.acquire()
+
+    assert len(calls) == 1, f"expected 1 lock call, got {calls}"
+    assert calls[0][1] == fake_fcntl.LOCK_EX | fake_fcntl.LOCK_NB
+
+    lock.release()
+
+    assert len(calls) == 2, f"expected 2 calls (lock+unlock), got {calls}"
+    assert calls[1][1] == fake_fcntl.LOCK_UN
+    lock_path.unlink(missing_ok=True)
+
+
+def test_knowledge_write_lock_serializes_concurrent_writes(tmp_path: Path) -> None:
+    """_knowledge_write_lock() context manager — concurrent writes are serialized."""
+    paths = _set_logs_dir(tmp_path)
+    lock_path = paths.knowledge_lock
+
+    results: list[str] = []
+    barrier = threading.Barrier(2)
+    errors: list[str] = []
+
+    def writer(name: str) -> None:
+        try:
+            barrier.wait(5)
+            with orchestrator._knowledge_write_lock(paths=paths):
+                results.append(f"{name}-start")
+                time.sleep(0.05)
+                results.append(f"{name}-end")
+        except Exception as exc:
+            errors.append(f"{name}: {exc}")
+
+    t1 = threading.Thread(target=writer, args=("A",))
+    t2 = threading.Thread(target=writer, args=("B",))
+    t1.start()
+    t2.start()
+    t1.join(10)
+    t2.join(10)
+
+    assert not errors, f"unexpected errors: {errors}"
+    assert len(results) == 4
+
+    # Each writer's start must be immediately followed by its end (serialized)
+    for i in range(0, len(results), 2):
+        assert results[i].endswith("-start"), f"unexpected order: {results}"
+        assert results[i + 1].endswith("-end"), f"unexpected order: {results}"
+        assert results[i][:-6] == results[i + 1][:-4], f"mismatched writer: {results}"
+
+    lock_path.unlink(missing_ok=True)
+
+
+def test_acquire_run_lock_returns_looplock_instance(tmp_path: Path) -> None:
+    """_acquire_run_lock() returns a _LoopLock instance."""
+    paths = _set_logs_dir(tmp_path)
+    lock = orchestrator._acquire_run_lock(paths=paths)
+    assert isinstance(lock, orchestrator._LoopLock)
+    assert lock._handle is not None
+    lock.release()
+    assert lock._handle is None
+    paths.lock.unlink(missing_ok=True)
+
+
+def test_acquire_run_lock_double_acquisition_raises(tmp_path: Path) -> None:
+    """Double acquisition of run lock raises RuntimeError."""
+    paths = _set_logs_dir(tmp_path)
+    first_lock = orchestrator._acquire_run_lock(paths=paths)
+
+    with pytest.raises(RuntimeError, match="already running"):
+        orchestrator._acquire_run_lock(paths=paths)
+
+    first_lock.release()
+    paths.lock.unlink(missing_ok=True)
+
+
+def test_lock_cleanup_after_release_allows_reacquire(tmp_path: Path) -> None:
+    """After lock release, the lock file may remain but next process can acquire."""
+    lock_path = tmp_path / ".loop" / "lock"
+    lock = orchestrator._LoopLock(lock_path)
+    lock.acquire()
+    lock.release()
+
+    # Lock file may remain — that's acceptable
+    file_remains = lock_path.exists()
+
+    # Next acquisition should succeed
+    second_lock = orchestrator._LoopLock(lock_path)
+    second_lock.acquire()
+    assert second_lock._handle is not None
+    second_lock.release()
+
+    # Just to be safe, clean up
+    lock_path.unlink(missing_ok=True)
+    # file_remains is informational; we don't assert on it either way
+    assert file_remains is not None  # always True, just to use the variable
+
+
+def test_lock_release_without_acquire_is_noop(tmp_path: Path) -> None:
+    """Calling release() before acquire() is a safe no-op."""
+    lock_path = tmp_path / ".loop" / "lock"
+    lock = orchestrator._LoopLock(lock_path)
+    # Should not raise
+    lock.release()
+    assert lock._handle is None
+    lock_path.unlink(missing_ok=True)
