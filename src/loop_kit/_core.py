@@ -6980,7 +6980,21 @@ def _cherry_pick_lane_reports(
 ) -> tuple[str, list[LaneMergeRecord]]:
     current_head = _current_sha()
     if current_head != base_sha:
-        if preflight is not None and preflight.get("allow_head_mismatch"):
+        all_already_integrated = True
+        for lane_id in lane_execution_order:
+            report = lane_reports.get(lane_id)
+            if report is None:
+                continue
+            lane_head = str(report.get("head_sha", "")).strip()
+            if lane_head and lane_head != base_sha and not _git_is_ancestor(lane_head, "HEAD"):
+                all_already_integrated = False
+                break
+        if all_already_integrated:
+            _log(
+                f"Lane merge: all lane commits already integrated "
+                f"(base={base_sha[:8]}, head={current_head[:8]})"
+            )
+        elif preflight is not None and preflight.get("allow_head_mismatch"):
             _log(f"Lane merge: HEAD moved during lane execution (base={base_sha[:8]}, head={current_head[:8]})")
         else:
             raise ValidationError(
