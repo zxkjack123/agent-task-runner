@@ -55,6 +55,15 @@ jobs:
             echo "No integration-marked tests found; skipping."
           fi
 
+      - name: Compile check
+        run: uv run python -m py_compile src/loop_kit/orchestrator.py
+
+      - name: Import check
+        run: uv run python -c "from loop_kit.orchestrator import *"
+
+      - name: CLI smoke test
+        run: uv run python -m loop_kit --help
+
       - name: Run Ruff
         run: uv run --group dev ruff check src/loop_kit tests
 
