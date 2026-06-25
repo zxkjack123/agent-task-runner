@@ -7849,6 +7849,87 @@ def _render_dependency_tree(snapshot: _TaskDependencySnapshot) -> list[str]:
     return lines
 
 
+def _render_dependency_dag_mermaid(snapshot: _TaskDependencySnapshot) -> list[str]:
+    lines: list[str] = ["```mermaid", "graph TD"]
+    seen: set[str] = set()
+    queue: list[str] = [snapshot.root_task_id]
+    while queue:
+        task_id = queue.pop(0)
+        if task_id in seen:
+            continue
+        seen.add(task_id)
+        status = snapshot.status_by_task.get(task_id, "unknown")
+        style = (
+            "Done" if status == "done" else
+            "InProgress" if status in ("in_progress", "awaiting_work", "awaiting_review") else
+            "Blocked" if status == "blocked" else "Unknown"
+        )
+        lines.append(f'    {task_id}("{task_id} [{status}]")')
+        class_text = f"class {task_id} task{style}"
+        lines.append(f"    {class_text}")
+        for dep_id in snapshot.graph.get(task_id, []):
+            edge_text = f"    {task_id} --> {dep_id}"
+            lines.append(edge_text)
+            if dep_id not in seen and dep_id not in queue:
+                queue.append(dep_id)
+    for missing_id in snapshot.missing_reason_by_task:
+        if missing_id not in seen:
+            lines.append(f'    {missing_id}("{missing_id} [missing]")')
+            lines.append(f"    class {missing_id} taskMissing")
+    lines.append("```")
+    return lines
+
+
+def cmd_dep_graph(task_ref: str | None = None) -> None:
+    resolved_paths = _resolve_paths()
+    task_path = _resolve_task_path(task_ref) if task_ref else str(resolved_paths.task_card)
+    if not task_path or not Path(task_path).exists():
+        raise ValidationError(f"task card not found: {task_ref or task_path}")
+    snapshot = _build_task_dependency_snapshot(task_path)
+    print("Dependency DAG (Mermaid):")
+    for line in _render_dependency_dag_mermaid(snapshot):
+        print(line)
+    root_blockers = _dependency_blocked_reasons(snapshot)
+    if root_blockers:
+        print()
+        print("Blocked by:")
+        for reason in root_blockers:
+            print(f"  - {reason}")
+    else:
+        print()
+        print("Status: unblocked")
+
+
+def cmd_dep_blocked() -> None:
+    resolved_paths = _resolve_paths()
+    task_card_data = _read_json_if_exists(resolved_paths.task_card)
+    if not isinstance(task_card_data, dict):
+        print("No active task card.")
+        return
+    task_card = cast(TaskCard, task_card_data)
+    deps = list(cast(list[str], task_card.get("depends_on", [])))
+    if not deps:
+        print("No dependencies declared.")
+        return
+    print(f"Task {task_card.get('task_id', 'UNKNOWN')} depends on:")
+    all_satisfied = True
+    for dep_id in deps:
+        dep_path = _resolve_task_card_path_by_id(dep_id)
+        if dep_path is None:
+            print(f"  {dep_id}: MISSING (task card not found)")
+            all_satisfied = False
+            continue
+        _, dep_card, _ = _load_task_card(str(dep_path))
+        dep_status = _task_card_status(dep_card)
+        if dep_status in ("done",):
+            print(f"  {dep_id}: SATISFIED ({dep_status})")
+        else:
+            print(f"  {dep_id}: BLOCKING ({dep_status})")
+            all_satisfied = False
+    if all_satisfied:
+        print("All dependencies satisfied.")
+
+
 def _load_config(paths: LoopPaths | None = None) -> dict:
     """Load .loop/config defaults (config.yaml first, then config.json)."""
     config_file = _resolve_paths(paths).config
@@ -12244,6 +12325,12 @@ def main() -> None:
     knowledge_sub.add_parser("stats", help="Print knowledge base summary counts")
     knowledge_sub.add_parser("reindex", help="Drop and rebuild knowledge SQLite FTS index")
 
+    dep_p = sub.add_parser("dep", parents=[shared], help="Show task dependency graph and blocked tasks")
+    dep_sub = dep_p.add_subparsers(dest="dep_cmd")
+    dep_graph_p = dep_sub.add_parser("graph", help="Show Mermaid dependency DAG")
+    dep_graph_p.add_argument("task_ref", nargs="?", default=None, help="Task ID (default: active task)")
+    dep_sub.add_parser("blocked", help="List blocked dependencies for active task")
+
     run_p = sub.add_parser("run", parents=[shared], help="Run the full PM-controlled review loop")
     run_p.add_argument("task_ref", nargs="?", default=None, help="Task ID (e.g. T-601) or path to task card JSON")
     run_p.add_argument("--task", default=None, help="Path to task card JSON (overrides positional task_ref)")
@@ -12386,6 +12473,14 @@ def main() -> None:
             else:
                 knowledge_p.print_help()
                 raise ValidationError("knowledge subcommand required")
+        elif args.cmd == "dep":
+            if args.dep_cmd == "graph":
+                cmd_dep_graph(args.task_ref if hasattr(args, "task_ref") else None)
+            elif args.dep_cmd == "blocked":
+                cmd_dep_blocked()
+            else:
+                dep_p.print_help()
+                raise ValidationError("dep subcommand required")
         elif args.cmd == "run":
             resolved_paths = _resolve_paths()
             file_cfg = _load_config(paths=resolved_paths)
