@@ -9479,6 +9479,30 @@ def cmd_config() -> None:
         print(f"  {key}={effective!r} [{source}]{env_str}{file_str}")
 
 
+def cmd_session() -> None:
+    resolved_paths = _resolve_paths()
+    state = _load_state(paths=resolved_paths)
+    run_id = _ensure_state_run_id(state)
+    sessions = _normalize_sessions_map(state.get("sessions"))
+    print("Session state:")
+    print(f"  run_id={run_id}")
+    print(f"  task_id={state.get('task_id')}")
+    print(f"  round={state.get('round')}")
+    if not sessions:
+        print("  sessions: (none)")
+    else:
+        print("  sessions:")
+        for role in _SESSION_ROLES:
+            entry = sessions.get(role)
+            if not entry:
+                print(f"    {role}: (none)")
+                continue
+            sid = entry.get("session_id", "?")
+            backend = entry.get("backend", "?")
+            started = entry.get("started_round", "?")
+            print(f"    {role}: backend={backend} session={sid} started_round={started}")
+
+
 def cmd_health(ttl: int) -> None:
     for role in ("worker", "reviewer"):
         alive, reason = _role_is_alive(role, ttl)
@@ -12385,6 +12409,7 @@ def main() -> None:
     dep_sub.add_parser("blocked", help="List blocked dependencies for active task")
 
     sub.add_parser("config", parents=[shared], help="Show current effective configuration")
+    sub.add_parser("session", parents=[shared], help="Show session state and resume policy")
 
     run_p = sub.add_parser("run", parents=[shared], help="Run the full PM-controlled review loop")
     run_p.add_argument("task_ref", nargs="?", default=None, help="Task ID (e.g. T-601) or path to task card JSON")
@@ -12491,6 +12516,8 @@ def main() -> None:
             cmd_status(tree=bool(args.tree), dependency_map=bool(args.dependency_map), paths=resolved_paths)
         elif args.cmd == "config":
             cmd_config()
+        elif args.cmd == "session":
+            cmd_session()
         elif args.cmd == "health":
             cmd_health(args.ttl)
         elif args.cmd == "dispatch-metrics":
