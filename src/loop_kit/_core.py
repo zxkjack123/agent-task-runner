@@ -8144,6 +8144,24 @@ def _load_env_config() -> dict:
     if backend_pref_raw is not None:
         env_cfg["backend_preference"] = _normalize_backend_preference(backend_pref_raw)
 
+    for env_var, config_key in (
+        ("LOOP_TIMEOUT", "timeout"),
+        ("LOOP_HEARTBEAT_TTL", "heartbeat_ttl"),
+        ("LOOP_DISPATCH_RETRIES", "dispatch_retries"),
+        ("LOOP_DISPATCH_RETRY_BASE_SEC", "dispatch_retry_base_sec"),
+        ("LOOP_MAX_SESSION_ROUNDS", "max_session_rounds"),
+        ("LOOP_ARTIFACT_TIMEOUT", "artifact_timeout"),
+        ("LOOP_WORKER_BACKEND", "worker_backend"),
+        ("LOOP_REVIEWER_BACKEND", "reviewer_backend"),
+        ("LOOP_DISPATCH_BACKEND", "dispatch_backend"),
+        ("LOOP_ALLOW_DIRTY", "allow_dirty"),
+        ("LOOP_VERBOSE", "verbose"),
+        ("LOOP_REQUIRE_HEARTBEAT", "require_heartbeat"),
+    ):
+        raw = os.getenv(env_var)
+        if raw is not None and raw.strip():
+            env_cfg[config_key] = raw
+
     return env_cfg
 
 
@@ -9424,6 +9442,41 @@ def cmd_heartbeat(role: str, interval: int, paths: LoopPaths | None = None) -> N
         _log(f"Heartbeat stopped for role={role}")
         print("\n  Heartbeat stopped.")
         sys.exit(EXIT_OK)
+
+
+def cmd_config() -> None:
+    resolved_paths = _resolve_paths()
+    file_cfg = _load_config(paths=resolved_paths)
+    env_cfg = _load_env_config()
+    print("Effective configuration (CLI > env > file > default):")
+    print(f"  config_root={resolved_paths.dir}")
+    for key, default in (
+        ("max_rounds", 3),
+        ("timeout", 0),
+        ("heartbeat_ttl", 0),
+        ("dispatch_timeout", 0),
+        ("dispatch_retries", 2),
+        ("dispatch_retry_base_sec", 5),
+        ("max_session_rounds", 0),
+        ("max_parallel_workers", DEFAULT_MAX_PARALLEL_WORKERS),
+        ("artifact_timeout", 90),
+        ("worker_backend", "opencode"),
+        ("reviewer_backend", "opencode"),
+        ("dispatch_backend", "native"),
+        ("auto_dispatch", False),
+        ("worker_noop_as_error", True),
+        ("allow_dirty", False),
+        ("verbose", False),
+        ("aggressive_parallelism", False),
+        ("require_heartbeat", False),
+    ):
+        env_val = env_cfg.get(key)
+        file_val = file_cfg.get(key)
+        effective = env_val if env_val is not None else (file_val if file_val is not None else default)
+        source = "env" if env_val is not None else ("file" if file_val is not None else "default")
+        env_str = f" (env={env_val!r})" if env_val is not None else ""
+        file_str = f" (file={file_val!r})" if file_val is not None and env_val is None else ""
+        print(f"  {key}={effective!r} [{source}]{env_str}{file_str}")
 
 
 def cmd_health(ttl: int) -> None:
@@ -12331,6 +12384,8 @@ def main() -> None:
     dep_graph_p.add_argument("task_ref", nargs="?", default=None, help="Task ID (default: active task)")
     dep_sub.add_parser("blocked", help="List blocked dependencies for active task")
 
+    sub.add_parser("config", parents=[shared], help="Show current effective configuration")
+
     run_p = sub.add_parser("run", parents=[shared], help="Run the full PM-controlled review loop")
     run_p.add_argument("task_ref", nargs="?", default=None, help="Task ID (e.g. T-601) or path to task card JSON")
     run_p.add_argument("--task", default=None, help="Path to task card JSON (overrides positional task_ref)")
@@ -12434,6 +12489,8 @@ def main() -> None:
             cmd_index(paths=resolved_paths)
         elif args.cmd == "status":
             cmd_status(tree=bool(args.tree), dependency_map=bool(args.dependency_map), paths=resolved_paths)
+        elif args.cmd == "config":
+            cmd_config()
         elif args.cmd == "health":
             cmd_health(args.ttl)
         elif args.cmd == "dispatch-metrics":
