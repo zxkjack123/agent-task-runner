@@ -9,3 +9,4 @@ build/
 *.egg
 uv.lock
 nul
+.coverage
