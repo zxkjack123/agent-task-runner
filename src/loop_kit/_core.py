@@ -4915,6 +4915,118 @@ def cmd_knowledge_benchmark(query: str, iterations: int) -> None:
     print(f"  millisecond_class={millisecond_class}")
 
 
+def cmd_knowledge_search(query: str, limit: int, min_score: int) -> None:
+    normalized_query = query.strip()
+    if not normalized_query:
+        raise ValidationError("query must be non-empty")
+    query_tokens = _knowledge_tokens(normalized_query)
+    query_token_weights = {token: 1.0 for token in query_tokens}
+    project_fact_entries = _load_project_facts()
+    pitfall_entries = _load_pitfalls()
+    patterns, _ = _load_patterns_with_governance(persist=False)
+    facts, pitfalls, selected_patterns, diag = _retrieve_ranked_knowledge(
+        query_token_weights=query_token_weights,
+        query_text=normalized_query,
+        project_fact_entries=project_fact_entries,
+        pitfall_entries=pitfall_entries,
+        patterns=patterns,
+        sync_index=True,
+    )
+    backend = diag.get("backend", "file_keyword")
+    fts = " (FTS)" if diag.get("fts_available") else ""
+    print(f"Knowledge search: backend={backend}{fts}")
+    print(f"  query={normalized_query}")
+    rank = 0
+    for entry in facts:
+        rank += 1
+        score = _knowledge_score(entry, query_tokens)
+        if score < min_score:
+            continue
+        print(f"  {rank}. [fact] (score={score}) {entry}")
+        if rank >= limit:
+            break
+    shown = rank
+    for entry in pitfalls:
+        rank += 1
+        score = _knowledge_score(entry, query_tokens)
+        if score < min_score:
+            continue
+        print(f"  {rank}. [pitfall] (score={score}) {entry}")
+        if rank >= limit:
+            break
+    shown = min(rank, limit) if rank > shown else shown
+    for entry in selected_patterns:
+        rank += 1
+        score = _knowledge_score(entry, query_tokens)
+        if score < min_score:
+            continue
+        print(f"  {rank}. [pattern] (score={score}) {entry}")
+        if rank >= limit:
+            break
+    if rank == 0:
+        print("  (no results)")
+
+
+def cmd_knowledge_stats() -> None:
+    fact_entries = _load_project_facts()
+    pitfall_entries = _load_pitfalls()
+    patterns, stale_patterns = _load_patterns_with_governance(persist=False)
+    fact_stale = sum(
+        1 for f in fact_entries
+        if isinstance(f.get("source_version"), str) and isinstance(f.get("last_verified"), str)
+        and f.get("source_version", "") != f.get("last_verified", "")
+    )
+    pitfall_stale = sum(
+        1 for p in pitfall_entries
+        if isinstance(p.get("source_version"), str) and isinstance(p.get("last_verified"), str)
+        and p.get("source_version", "") != p.get("last_verified", "")
+    )
+    high_confidence = sum(
+        1 for e in patterns if _coerce_confidence(e.get("confidence"), default=0.0) >= PATTERN_HIGH_CONFIDENCE
+    )
+    conn = _connect_knowledge_db()
+    try:
+        row_count = conn.execute("SELECT COUNT(*) FROM knowledge_entries").fetchone()[0]
+        fts_available = _knowledge_table_exists(conn, "knowledge_entries_fts")
+    except sqlite3.Error:
+        row_count = 0
+        fts_available = False
+    finally:
+        conn.close()
+    print("Knowledge stats:")
+    print(f"  facts: {len(fact_entries)} (stale={fact_stale})")
+    print(f"  pitfalls: {len(pitfall_entries)} (stale={pitfall_stale})")
+    print(f"  patterns: {len(patterns)} (stale={stale_patterns}, high_confidence={high_confidence})")
+    print(f"  sqlite_rows: {row_count}")
+    print(f"  fts_available: {fts_available}")
+
+
+def cmd_knowledge_reindex() -> None:
+    fact_entries = _load_project_facts()
+    pitfall_entries = _load_pitfalls()
+    patterns, _ = _load_patterns_with_governance(persist=False)
+    print("Rebuilding knowledge index...")
+    conn = _connect_knowledge_db()
+    try:
+        conn.execute("DROP TABLE IF EXISTS knowledge_entries_fts")
+        conn.execute("DROP TABLE IF EXISTS knowledge_entries")
+        conn.commit()
+    finally:
+        conn.close()
+    result = _sync_knowledge_sqlite_index(
+        project_fact_entries=fact_entries,
+        pitfall_entries=pitfall_entries,
+        pattern_entries=patterns,
+    )
+    row_count = result.get("row_count", 0)
+    deduped = result.get("deduped", 0)
+    fts = result.get("fts_available", False)
+    print(f"  rows: {row_count}")
+    print(f"  deduped: {deduped}")
+    print(f"  fts: {fts}")
+    print("Reindex complete.")
+
+
 def _load_patterns_with_governance(*, persist: bool = False, paths: LoopPaths | None = None) -> tuple[list[dict], int]:
     resolved_paths = _resolve_paths(paths)
     text = _read_text_optional(resolved_paths.patterns)
@@ -12115,6 +12227,22 @@ def main() -> None:
         default=30,
         help="Number of measured retrieval iterations (default: 30)",
     )
+    knowledge_search_p = knowledge_sub.add_parser("search", help="Search knowledge base by keyword query")
+    knowledge_search_p.add_argument("query", help="Search query text")
+    knowledge_search_p.add_argument(
+        "--limit",
+        type=_parse_positive_int_arg,
+        default=10,
+        help="Maximum results to return (default: 10)",
+    )
+    knowledge_search_p.add_argument(
+        "--min-score",
+        type=int,
+        default=0,
+        help="Minimum keyword score to include (default: 0)",
+    )
+    knowledge_sub.add_parser("stats", help="Print knowledge base summary counts")
+    knowledge_sub.add_parser("reindex", help="Drop and rebuild knowledge SQLite FTS index")
 
     run_p = sub.add_parser("run", parents=[shared], help="Run the full PM-controlled review loop")
     run_p.add_argument("task_ref", nargs="?", default=None, help="Task ID (e.g. T-601) or path to task card JSON")
@@ -12249,6 +12377,12 @@ def main() -> None:
                 cmd_knowledge_dedupe()
             elif args.knowledge_cmd == "benchmark":
                 cmd_knowledge_benchmark(args.query, args.iterations)
+            elif args.knowledge_cmd == "search":
+                cmd_knowledge_search(args.query, args.limit, args.min_score)
+            elif args.knowledge_cmd == "stats":
+                cmd_knowledge_stats()
+            elif args.knowledge_cmd == "reindex":
+                cmd_knowledge_reindex()
             else:
                 knowledge_p.print_help()
                 raise ValidationError("knowledge subcommand required")
