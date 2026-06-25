@@ -6980,10 +6980,13 @@ def _cherry_pick_lane_reports(
 ) -> tuple[str, list[LaneMergeRecord]]:
     current_head = _current_sha()
     if current_head != base_sha:
-        raise ValidationError(
-            "Lane merge requires clean base head before cherry-pick: "
-            f"expected {base_sha}, got {current_head}"
-        )
+        if preflight is not None and preflight.get("allow_head_mismatch"):
+            _log(f"Lane merge: HEAD moved during lane execution (base={base_sha[:8]}, head={current_head[:8]})")
+        else:
+            raise ValidationError(
+                "Lane merge requires clean base head before cherry-pick: "
+                f"expected {base_sha}, got {current_head}"
+            )
     if conflict_policy not in _LANE_MERGE_CONFLICT_POLICY_CHOICES:
         raise ValidationError(
             "Invalid lane merge conflict policy: "
