@@ -1025,7 +1025,7 @@ class _LoopLock:
         try:
             handle.seek(0, os.SEEK_END)
             if handle.tell() == 0:
-                handle.write(b"\0")
+                handle.write(f"pid:{os.getpid()}\n".encode())
                 handle.flush()
             handle.seek(0)
         except OSError as e:
@@ -1067,9 +1067,32 @@ class _LoopLock:
 
 def _acquire_run_lock(paths: LoopPaths | None = None) -> _LoopLock:
     resolved_paths = _resolve_paths(paths)
+    _cleanup_stale_lock(resolved_paths.lock)
     lock = _LoopLock(resolved_paths.lock)
     lock.acquire()
     return lock
+
+
+def _cleanup_stale_lock(lock_path: Path) -> None:
+    """Remove the lock file if the PID it contains is no longer alive."""
+    if not lock_path.exists():
+        return
+    try:
+        first_line = lock_path.read_text(encoding="utf-8").split("\n")[0]
+        if not first_line.startswith("pid:"):
+            return
+        pid_str = first_line[4:].strip()
+        lock_pid = int(pid_str)
+    except (OSError, ValueError, IndexError):
+        return
+    if lock_pid == os.getpid():
+        return
+    try:
+        os.kill(lock_pid, 0)
+    except OSError:
+        with contextlib.suppress(OSError):
+            lock_path.unlink()
+        _log(f"Cleaned up orphan lock file from PID {lock_pid}: {lock_path}")
 
 
 def _heartbeat_path(role: str, paths: LoopPaths | None = None) -> Path:
@@ -2968,9 +2991,22 @@ def _run_auto_dispatch(
                     **attempt_budget_before,
                 ),
             )
+            proc_env = os.environ.copy()
+            actual_cwd = Path(cwd) if cwd is not None else ROOT
+            git_file = actual_cwd / ".git"
+            if git_file.is_file() and not git_file.is_dir():
+                try:
+                    gitdir_raw = git_file.read_text(encoding="utf-8").strip()
+                    if gitdir_raw.startswith("gitdir: "):
+                        gitdir = gitdir_raw[len("gitdir: "):]
+                        proc_env["GIT_DIR"] = gitdir
+                        proc_env["GIT_WORK_TREE"] = str(actual_cwd)
+                except OSError:
+                    pass
             proc = subprocess.Popen(
                 cmd,
-                cwd=str(cwd if cwd is not None else ROOT),
+                cwd=str(actual_cwd),
+                env=proc_env,
                 stdin=(subprocess.PIPE if stdin_text is not None else None),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -6195,6 +6231,7 @@ def _load_state(paths: LoopPaths | None = None) -> dict:
         if backup_state is not None:
             print("state.json corrupted, recovered from backup", file=sys.stderr)
             _atomic_write_json(state_file, backup_state)
+            state_backup.unlink(missing_ok=True)
             return backup_state
         _log(f"Warning: state.json is corrupted: {e}. Using fresh default state.")
         return default_state.copy()
@@ -6203,6 +6240,7 @@ def _load_state(paths: LoopPaths | None = None) -> dict:
         if backup_state is not None:
             print("state.json corrupted, recovered from backup", file=sys.stderr)
             _atomic_write_json(state_file, backup_state)
+            state_backup.unlink(missing_ok=True)
             return backup_state
         _log(f"Warning: unable to read state.json: {e}. Using fresh default state.")
         return default_state.copy()
@@ -6234,8 +6272,12 @@ def _save_state(state: dict, paths: LoopPaths | None = None) -> None:
             previous_state = previous
         state_backup.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(state_file, state_backup)
+        _STATE_CMP_KEYS = ("state", "round", "outcome", "task_id", "run_id", "base_sha", "head_sha", "sessions", "lane_state", "head_sha_history")
+        if previous_state is not None and all(
+            previous_state.get(k) == state_to_save.get(k) for k in _STATE_CMP_KEYS
+        ):
+            return
     _atomic_write_json(state_file, state_to_save)
-    _ = previous_state
 
 
 def _emit_state_transition_event(
@@ -6475,6 +6517,29 @@ def _git_worktree_paths() -> set[Path]:
         except OSError:
             continue
     return paths
+
+
+def _prune_stale_worktrees(paths: LoopPaths | None = None) -> int:
+    """Prune stale git worktrees and orphan loop worktree directories."""
+    resolved_paths = _resolve_paths(paths)
+    worktrees_root = resolved_paths.dir / "worktrees"
+    removed = 0
+    with contextlib.suppress(RuntimeError):
+        _git("worktree", "prune")
+    if not worktrees_root.is_dir():
+        return 0
+    registered = _git_worktree_paths()
+    for entry in worktrees_root.iterdir():
+        if not entry.is_dir():
+            continue
+        resolved = entry.resolve(strict=False)
+        if resolved in registered:
+            continue
+        with contextlib.suppress(OSError):
+            shutil.rmtree(entry, ignore_errors=True)
+            removed += 1
+            _log(f"Pruned orphan worktree directory: {entry}")
+    return removed
 
 
 def _cleanup_lane_worktrees_for_round(
@@ -8651,6 +8716,8 @@ def cmd_index(paths: LoopPaths | None = None) -> None:
 # ── init ────────────────────────────────────────────────────────────
 def cmd_init(paths: LoopPaths | None = None) -> None:
     resolved_paths = _resolve_paths(paths)
+    if _is_git_repo_root(resolved_paths.root):
+        _prune_stale_worktrees(paths=resolved_paths)
     loop_dir = resolved_paths.dir
     logs_dir = resolved_paths.logs
     runtime_dir = loop_dir / "runtime"
@@ -11600,6 +11667,9 @@ def _run_multi_round_via_subprocess(
     old_sigterm = None
     if hasattr(signal, "SIGTERM"):
         old_sigterm = signal.signal(signal.SIGTERM, _outer_interrupt_handler)
+
+    if _is_git_repo_root(resolved_paths.root):
+        _prune_stale_worktrees(paths=resolved_paths)
 
     try:
         for round_num in range(start_round, config.max_rounds + 1):

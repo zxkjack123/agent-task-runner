@@ -6864,6 +6864,8 @@ def test_outer_loop_spawns_single_round_subprocess(tmp_path: Path, monkeypatch) 
     def fake_subprocess_popen(cmd, **kwargs):
         _ = kwargs
         calls.append(cmd)
+        if "worktree" in cmd and "prune" in cmd:
+            return _FakeProc(stdout_lines=[])
         round_num = int(cmd[cmd.index("--round") + 1])
         orchestrator.REVIEW_REPORT.write_text(
             json.dumps(
