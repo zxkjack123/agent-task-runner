@@ -490,6 +490,7 @@ _KNOWN_CONFIG_KEYS: frozenset[str] = frozenset({
     "artifact_timeout",
     "worker_noop_as_error",
     "allow_dirty",
+    "outcome_file",
     "verbose",
 })
 _VALID_REVIEW_DECISIONS: frozenset[str] = frozenset({"approve", "changes_required", "skipped_no_change"})
@@ -565,6 +566,7 @@ class RunConfig:
     artifact_timeout: int = DEFAULT_DISPATCH_ARTIFACT_TIMEOUT_SEC
     worker_noop_as_error: bool = DEFAULT_WORKER_NOOP_AS_ERROR
     allow_dirty: bool = False
+    outcome_file: str | None = None
     verbose: bool = False
 
 
@@ -963,25 +965,36 @@ def _write_round_summary(
     review_non_blocking: list[str],
     round_details: list[dict],
     paths: LoopPaths | None = None,
+    exit_code: int = 0,
+    decision: str = "",
+    review_blocking: list[str] | None = None,
+    worker_notes: str = "",
+    duration_ms: int = 0,
 ) -> None:
     resolved_paths = _resolve_paths(paths)
+    resolved_paths.summary.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, object] = {
+        "task_id": task_id,
+        "run_id": run_id,
+        "outcome": outcome,
+        "rounds": round_num,
+        "base_sha": base_sha,
+        "head_sha": head_sha,
+        "files_changed": files_changed,
+        "review_non_blocking": review_non_blocking,
+        "round_details": round_details,
+        "exit_code": exit_code,
+    }
+    if decision:
+        payload["decision"] = decision
+    if review_blocking:
+        payload["review_blocking"] = review_blocking
+    if worker_notes:
+        payload["worker_notes"] = worker_notes
+    if duration_ms:
+        payload["duration_ms"] = duration_ms
     resolved_paths.summary.write_text(
-        json.dumps(
-            {
-                "task_id": task_id,
-                "run_id": run_id,
-                "outcome": outcome,
-                "rounds": round_num,
-                "base_sha": base_sha,
-                "head_sha": head_sha,
-                "files_changed": files_changed,
-                "review_non_blocking": review_non_blocking,
-                "round_details": round_details,
-            },
-            indent=2,
-            ensure_ascii=False,
-        )
-        + "\n",
+        json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
 
@@ -998,6 +1011,23 @@ def _archive_state_for_round(
     if dest.exists():
         return dest
     return _archive_bus_file(resolved_paths.state, task_id, round_num, "state", run_id=run_id)
+
+
+def _copy_outcome_file(outcome_file: str | None, paths: LoopPaths | None = None) -> None:
+    """Copy summary.json to the specified outcome_file path."""
+    if not outcome_file:
+        return
+    resolved_paths = _resolve_paths(paths)
+    summary_path = resolved_paths.summary
+    if not summary_path.exists():
+        _log(f"Warning: summary.json not found, cannot copy to outcome-file: {outcome_file}")
+        return
+    try:
+        dest = Path(outcome_file)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(summary_path, dest)
+    except OSError as e:
+        _log(f"Warning: failed to copy outcome file to {outcome_file}: {e}")
 
 
 def _lock_file(handle) -> None:
@@ -8525,6 +8555,7 @@ def _fail_with_state(
 ) -> None:
     _log(message)
     print(f"  Error: {message}", file=sys.stderr)
+    resolved_paths = _resolve_paths(paths)
     _apply_state_transition(
         state,
         trigger=STATE_TRIGGER_TERMINAL_ERROR,
@@ -8535,7 +8566,25 @@ def _fail_with_state(
             "error": message,
         },
     )
-    _write_task_card_status(task_path or str(_resolve_paths(paths).task_card), TASK_STATUS_BLOCKED, paths=paths)
+    _write_task_card_status(task_path or str(resolved_paths.task_card), TASK_STATUS_BLOCKED, paths=paths)
+    # Write outcome summary before raising exception (best-effort)
+    try:
+        _write_round_summary(
+            task_id=state.get("task_id", "UNKNOWN"),
+            run_id=state.get("run_id", ""),
+            outcome=outcome,
+            round_num=state.get("round", 0),
+            base_sha=state.get("base_sha", ""),
+            head_sha=state.get("head_sha", state.get("base_sha", "")),
+            files_changed=[],
+            review_non_blocking=[],
+            round_details=cast(list[dict], state.get("round_details", [])),
+            review_blocking=[message],
+            exit_code=exit_code,
+            paths=resolved_paths,
+        )
+    except OSError:
+        pass
     try:
         # Map exit code to appropriate exception type
         if exit_code == EXIT_VALIDATION_ERROR:
@@ -9723,6 +9772,9 @@ def _single_round_subprocess_cmd(
         cmd.append("--worker-noop-as-success")
     if config.verbose:
         cmd.append("--verbose")
+    if config.outcome_file:
+        cmd.append("--outcome-file")
+        cmd.append(str(config.outcome_file))
     return cmd
 
 
@@ -11795,6 +11847,9 @@ def _run_multi_round_via_subprocess(
         if hasattr(signal, "SIGTERM") and old_sigterm is not None:
             signal.signal(signal.SIGTERM, old_sigterm)
 
+    # Copy outcome to external path if requested
+    _copy_outcome_file(config.outcome_file, paths=resolved_paths)
+
     if interrupted:
         if current_round is not None and task_id:
             task_card_data = _read_json_if_exists(resolved_paths.task_card)
@@ -12103,6 +12158,9 @@ def _single_round_handle_worker_noop(
             files_changed=cast(list[str], work.get("files_changed", [])),
             review_non_blocking=[],
             round_details=cast(list[dict], state.get("round_details", [])),
+            review_blocking=[noop_message],
+            exit_code=EXIT_VALIDATION_ERROR,
+            worker_notes=str(work.get("notes", "")),
             paths=resolved_paths,
         )
         raise ValidationError(noop_message)
@@ -12125,6 +12183,8 @@ def _single_round_handle_worker_noop(
         files_changed=cast(list[str], work.get("files_changed", [])),
         review_non_blocking=[],
         round_details=cast(list[dict], state.get("round_details", [])),
+        decision="skipped_no_change",
+        worker_notes=str(work.get("notes", "")),
         paths=resolved_paths,
     )
     _archive_task_summary(task_id, paths=resolved_paths)
@@ -12185,6 +12245,9 @@ def _single_round_handle_review_approved(
         files_changed=cast(list[str], work.get("files_changed", [])),
         review_non_blocking=cast(list[str], review.get("non_blocking_suggestions", [])),
         round_details=cast(list[dict], state.get("round_details", [])),
+        decision=decision,
+        worker_notes=str(work.get("notes", "")),
+        duration_ms=int(work.get("duration_ms", 0)),
         paths=resolved_paths,
     )
     _archive_task_summary(task_id, paths=resolved_paths)
@@ -12585,6 +12648,11 @@ def main() -> None:
     run_p.add_argument("--single-round", action="store_true", help="Run exactly one round and exit")
     run_p.add_argument("--round", type=int, help="Round number for --single-round mode")
     run_p.add_argument("--allow-dirty", action="store_true", help="Allow run to start with dirty tracked git files")
+    run_p.add_argument(
+        "--outcome-file",
+        default=None,
+        help="Copy summary.json to this path after completion (for machine consumption by AOM/PM)",
+    )
     run_p.add_argument("--resume", action="store_true", help="Resume from .loop/state.json contract")
     run_p.add_argument("--reset", action="store_true", help="Reset stale bus files before running (default: off)")
     run_p.add_argument("--verbose", action="store_true", help="Stream full backend stdout lines during auto-dispatch")
@@ -12757,6 +12825,7 @@ def main() -> None:
                     field_name="worker_noop_as_error",
                 ),
                 allow_dirty=args.allow_dirty,
+                outcome_file=args.outcome_file,
                 verbose=args.verbose,
             )
             _validate_run_config(config)
