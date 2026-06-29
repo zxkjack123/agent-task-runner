@@ -151,6 +151,14 @@ class ReviewReport(TypedDict):
     non_blocking_suggestions: NotRequired[list[str]]
 
 
+class VerificationResult(TypedDict):
+    passed: bool
+    output: str
+    exit_code: int
+    command: str
+    expected_output: str
+
+
 class ReviewRequest(TypedDict):
     task_id: str
     run_id: str
@@ -164,6 +172,7 @@ class ReviewRequest(TypedDict):
     round: int
     worker_notes: str
     worker_tests: list[WorkReportTest]
+    verification_result: NotRequired[VerificationResult]
 
 
 class TaskPacket(TypedDict):
@@ -194,6 +203,13 @@ class TaskLane(TypedDict, total=False):
     acceptance_checks: NotRequired[list[str]]
 
 
+class VerificationSpec(TypedDict):
+    command: str
+    expected_output: NotRequired[str]
+    timeout_sec: NotRequired[int]
+    cwd: NotRequired[str]
+
+
 class TaskCard(TypedDict, total=False):
     task_id: Required[str]
     goal: Required[str]
@@ -207,6 +223,7 @@ class TaskCard(TypedDict, total=False):
     lane_review_parallel: NotRequired[bool]
     lane_merge_conflict_policy: NotRequired[str]
     lane_preserve_worktrees_on_failure: NotRequired[bool]
+    verification: NotRequired[VerificationSpec]
 
 
 class CriticalDependencySection(TypedDict):
@@ -1028,6 +1045,63 @@ def _copy_outcome_file(outcome_file: str | None, paths: LoopPaths | None = None)
         shutil.copy2(summary_path, dest)
     except OSError as e:
         _log(f"Warning: failed to copy outcome file to {outcome_file}: {e}")
+
+
+_VERIFICATION_MAX_OUTPUT_BYTES = 4096
+_VERIFICATION_DEFAULT_TIMEOUT_SEC = 30
+
+
+def _execute_verification_check(verification: VerificationSpec) -> VerificationResult:
+    """Execute a verification command safely and return its result.
+
+    The command is run in a subprocess with timeout and output truncation.
+    This function is called by the orchestrator, NOT exposed to the LLM.
+    """
+    cmd = verification.get("command", "").strip()
+    if not cmd:
+        return {"passed": False, "output": "(no command)", "exit_code": -1, "command": "", "expected_output": ""}
+    expected = str(verification.get("expected_output", "")).strip()
+    timeout_sec = int(verification.get("timeout_sec", _VERIFICATION_DEFAULT_TIMEOUT_SEC) or _VERIFICATION_DEFAULT_TIMEOUT_SEC)
+    cwd_raw = verification.get("cwd")
+    cwd = str(ROOT) if not cwd_raw else str(cwd_raw)
+    try:
+        result = subprocess.run(
+            cmd,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout_sec,
+            cwd=cwd,
+        )
+        output = result.stdout + result.stderr
+        if len(output) > _VERIFICATION_MAX_OUTPUT_BYTES:
+            output = output[:_VERIFICATION_MAX_OUTPUT_BYTES] + "\n...[truncated]"
+        passed = result.returncode == 0
+        if expected and not expected.isspace():
+            passed = passed and expected in (result.stdout + result.stderr)
+        return {
+            "passed": passed,
+            "output": output,
+            "exit_code": result.returncode,
+            "command": cmd,
+            "expected_output": expected,
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "passed": False,
+            "output": f"(timed out after {timeout_sec}s)",
+            "exit_code": -1,
+            "command": cmd,
+            "expected_output": expected,
+        }
+    except OSError as e:
+        return {
+            "passed": False,
+            "output": f"(execution error: {e})",
+            "exit_code": -1,
+            "command": cmd,
+            "expected_output": expected,
+        }
 
 
 def _lock_file(handle) -> None:
@@ -11456,6 +11530,14 @@ def _run_single_round(
     print(f"  Worker completed: {head_sha[:8]}")
     print(f"  Files changed: {', '.join(work.get('files_changed', []))}")
 
+    # Execute verification check (if defined) before building review request
+    verification_raw = task_card.get("verification")
+    verification_result: VerificationResult | None = None
+    if isinstance(verification_raw, dict) and verification_raw.get("command"):
+        verification_result = _execute_verification_check(cast(VerificationSpec, verification_raw))
+        vstatus = "PASS" if verification_result["passed"] else "FAIL"
+        print(f"  Verification: {vstatus} (exit={verification_result['exit_code']})")
+
     review_request: ReviewRequest = {
         "task_id": task_id,
         "run_id": run_id,
@@ -11470,6 +11552,8 @@ def _run_single_round(
         "worker_notes": work.get("notes", ""),
         "worker_tests": work.get("tests", []),
     }
+    if verification_result is not None:
+        cast(dict[str, object], review_request)["verification_result"] = verification_result
     _archive_bus_file(resolved_paths.review_request, task_id, round_num, "review_request")
     resolved_paths.review_request.write_text(
         json.dumps(review_request, indent=2, ensure_ascii=False) + "\n",
