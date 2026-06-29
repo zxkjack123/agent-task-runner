@@ -354,8 +354,10 @@ def test_main_loop_dir_overrides_all_bus_paths(tmp_path: Path, monkeypatch) -> N
         tree: bool = False,
         dependency_map: bool = False,
         paths: orchestrator.LoopPaths | None = None,
+        json_output: bool = False,
+        outcome_only: bool = False,
     ) -> None:
-        _ = (tree, dependency_map)
+        _ = (tree, dependency_map, json_output, outcome_only)
         assert paths is not None
         captured["loop_dir"] = paths.dir
         captured["logs_dir"] = paths.logs
@@ -436,7 +438,8 @@ def test_main_init_creates_prompt_templates_in_loop_dir(tmp_path: Path, monkeypa
 def test_main_status_dependency_map_flag_dispatches_to_cmd_status(monkeypatch) -> None:
     captured: dict[str, bool] = {}
 
-    def fake_status(*, tree: bool = False, dependency_map: bool = False, paths=None) -> None:
+    def fake_status(*, tree: bool = False, dependency_map: bool = False, paths=None, json_output: bool = False, outcome_only: bool = False) -> None:
+        _ = (tree, dependency_map, json_output, outcome_only)
         _ = paths
         captured["tree"] = tree
         captured["dependency_map"] = dependency_map

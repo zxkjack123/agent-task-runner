@@ -8838,9 +8838,40 @@ def cmd_init(paths: LoopPaths | None = None) -> None:
 
 
 # ── status ──────────────────────────────────────────────────────────
-def cmd_status(*, tree: bool = False, dependency_map: bool = False, paths: LoopPaths | None = None) -> None:
+def cmd_status(*, tree: bool = False, dependency_map: bool = False, paths: LoopPaths | None = None, json_output: bool = False, outcome_only: bool = False) -> None:
     resolved_paths = _resolve_paths(paths)
     state = _load_state(paths=resolved_paths)
+
+    if json_output:
+        if outcome_only and state.get("outcome") in _TERMINAL_SUCCESS_OUTCOMES:
+            print(json.dumps({"outcome": state["outcome"]}, ensure_ascii=False))
+            return
+        payload: dict[str, object] = {
+            "state": state.get("state", "unknown"),
+            "round": state.get("round", 0),
+            "task_id": state.get("task_id"),
+            "run_id": state.get("run_id"),
+            "outcome": state.get("outcome"),
+            "base_sha": state.get("base_sha"),
+            "head_sha": state.get("head_sha"),
+            "sessions": _normalize_sessions_map(state.get("sessions")),
+            "started_at": state.get("started_at"),
+            "lane_state": state.get("lane_state"),
+        }
+        # Include bus file status
+        bus_files: dict[str, str] = {}
+        for p in [
+            resolved_paths.task_card,
+            resolved_paths.work_report,
+            resolved_paths.review_request,
+            resolved_paths.review_report,
+            resolved_paths.fix_list,
+        ]:
+            bus_files[p.name] = "exists" if p.exists() else "missing"
+        payload["bus_files"] = bus_files
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return
+
     print(f"State: {state.get('state', 'unknown')}")
     print(f"Round: {state.get('round', 0)}")
     task_id = state.get("task_id")
@@ -12440,6 +12471,16 @@ def main() -> None:
         action="store_true",
         help="Show internal dependency map diagnostics for dispatch/session/file-bus/state",
     )
+    status_p.add_argument(
+        "--json",
+        action="store_true",
+        help="Output machine-readable JSON (for AOM/PM polling)",
+    )
+    status_p.add_argument(
+        "--outcome-only",
+        action="store_true",
+        help="With --json: if task is terminal, output only {outcome} for quick AOM checks",
+    )
 
     health_p = sub.add_parser("health", parents=[shared], help="Show worker/reviewer heartbeat health")
     health_p.add_argument(
@@ -12668,7 +12709,7 @@ def main() -> None:
         elif args.cmd == "index":
             cmd_index(paths=resolved_paths)
         elif args.cmd == "status":
-            cmd_status(tree=bool(args.tree), dependency_map=bool(args.dependency_map), paths=resolved_paths)
+            cmd_status(tree=bool(args.tree), dependency_map=bool(args.dependency_map), paths=resolved_paths, json_output=bool(args.json), outcome_only=bool(args.outcome_only))
         elif args.cmd == "config":
             cmd_config()
         elif args.cmd == "session":
