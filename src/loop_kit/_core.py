@@ -159,6 +159,14 @@ class VerificationResult(TypedDict):
     expected_output: str
 
 
+class PreflightPolicy(TypedDict, total=False):
+    allowed_roots: NotRequired[list[str]]
+    forbidden_patterns: NotRequired[list[str]]
+    require_git_clean: NotRequired[bool]
+    max_file_size_mb: NotRequired[int]
+    require_tests: NotRequired[bool]
+
+
 class ReviewRequest(TypedDict):
     task_id: str
     run_id: str
@@ -5916,6 +5924,10 @@ def _build_prompt_sections(task_id: str, round_num: int, paths: LoopPaths | None
             ("=== TASK PACKET ===", task_packet_section),
             (f"=== FIX LIST (round {round_num}) ===", f"fixes:\n{fix_list_section}"),
         ]
+    preflight_policy_parts = _load_preflight_policy(paths=resolved_paths)
+    preflight_text = _apply_preflight_to_prompt(preflight_policy_parts)
+    if preflight_text:
+        sections.append(("=== PREFLIGHT ===", preflight_text))
         if prior_context_section:
             lines = prior_context_section.split("\n", 1)
             sections.append((lines[0], lines[1] if len(lines) > 1 else ""))
@@ -5960,6 +5972,8 @@ def _worker_prompt(
         handoff_section = _render_handoff_context_section(task_id, round_num, paths=resolved_paths)
         knowledge_section = _render_knowledge_section(task_id, round_num, task_card, paths=resolved_paths)
         task_packet_section = _render_task_packet_section(paths=resolved_paths)
+        preflight_policy = _load_preflight_policy(paths=resolved_paths)
+        preflight_section = _apply_preflight_to_prompt(preflight_policy)
         context = {
             "task_id": task_id,
             "round_num": str(round_num),
@@ -5977,6 +5991,7 @@ def _worker_prompt(
             "handoff_section": handoff_section,
             "knowledge_section": knowledge_section,
             "task_packet_section": task_packet_section,
+            "preflight_section": preflight_section,
             "task_card_section": task_card_section,
             "prior_context_section": prior_context_section or "",
         }
@@ -8149,6 +8164,53 @@ def _warn_unknown_config_keys(data: dict) -> None:
         )
 
 
+_PREFLIGHT_PATH = _DEFAULTS_DIR / "preflight.yaml"
+
+
+def _load_preflight_policy(paths: LoopPaths | None = None) -> PreflightPolicy:
+    """Load preflight policy from .loop/preflight.yaml or .loop/preflight.json."""
+    resolved_paths = _resolve_paths(paths)
+    for ext in (".yaml", ".json"):
+        preflight_path = resolved_paths.dir / f"preflight{ext}"
+        if preflight_path.exists():
+            break
+    else:
+        return {}
+    try:
+        data = json.loads(preflight_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        try:
+            data = _load_config_from_yaml(preflight_path)
+        except ConfigError:
+            _log(f"Warning: preflight config invalid, using empty policy")
+            return {}
+    if isinstance(data, dict):
+        return cast(PreflightPolicy, data)
+    return {}
+
+
+def _apply_preflight_to_prompt(policy: PreflightPolicy) -> str:
+    """Convert a preflight policy to prompt constraint text for the worker."""
+    lines: list[str] = []
+    forbidden = policy.get("forbidden_patterns")
+    if isinstance(forbidden, list) and forbidden:
+        lines.append("SAFETY: NEVER use the following patterns:")
+        for p in forbidden:
+            lines.append(f"  - {p}")
+    require_clean = policy.get("require_git_clean")
+    if require_clean:
+        lines.append("SAFETY: Do NOT commit changes to files outside the in_scope list.")
+    max_mb = policy.get("max_file_size_mb")
+    if isinstance(max_mb, (int, float)) and max_mb > 0:
+        lines.append(f"CONSTRAINT: Maximum file size is {int(max_mb)} MB for new or modified files.")
+    require_tests = policy.get("require_tests")
+    if require_tests:
+        lines.append("CONSTRAINT: Must include tests for any new code (run pytest before reporting done).")
+    if not lines:
+        return ""
+    return "=== PREFLIGHT ===\n" + "\n".join(lines)
+
+
 def _load_config_from_yaml(path: Path) -> dict:
     try:
         import yaml
@@ -9715,6 +9777,14 @@ def cmd_config() -> None:
         env_str = f" (env={env_val!r})" if env_val is not None else ""
         file_str = f" (file={file_val!r})" if file_val is not None and env_val is None else ""
         print(f"  {key}={effective!r} [{source}]{env_str}{file_str}")
+
+    policy = _load_preflight_policy(paths=resolved_paths)
+    if policy:
+        print(f"  preflight: loaded ({len(policy)} rules)")
+        for k in sorted(policy.keys()):
+            print(f"    {k}={policy[k]!r}")
+    else:
+        print("  preflight: (none — create .loop/preflight.yaml to enable)")
 
 
 def cmd_session() -> None:
