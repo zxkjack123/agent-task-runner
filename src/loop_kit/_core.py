@@ -167,6 +167,12 @@ class PreflightPolicy(TypedDict, total=False):
     require_tests: NotRequired[bool]
 
 
+class KnowledgeUpdates(TypedDict, total=False):
+    patterns: NotRequired[list[str]]
+    pitfalls: NotRequired[list[str]]
+    facts: NotRequired[list[str]]
+
+
 class ReviewRequest(TypedDict):
     task_id: str
     run_id: str
@@ -995,6 +1001,7 @@ def _write_round_summary(
     review_blocking: list[str] | None = None,
     worker_notes: str = "",
     duration_ms: int = 0,
+    knowledge_updates: KnowledgeUpdates | None = None,
 ) -> None:
     resolved_paths = _resolve_paths(paths)
     resolved_paths.summary.parent.mkdir(parents=True, exist_ok=True)
@@ -1018,6 +1025,8 @@ def _write_round_summary(
         payload["worker_notes"] = worker_notes
     if duration_ms:
         payload["duration_ms"] = duration_ms
+    if knowledge_updates:
+        payload["knowledge_updates"] = knowledge_updates
     resolved_paths.summary.write_text(
         json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
@@ -5928,9 +5937,9 @@ def _build_prompt_sections(task_id: str, round_num: int, paths: LoopPaths | None
     preflight_text = _apply_preflight_to_prompt(preflight_policy_parts)
     if preflight_text:
         sections.append(("=== PREFLIGHT ===", preflight_text))
-        if prior_context_section:
-            lines = prior_context_section.split("\n", 1)
-            sections.append((lines[0], lines[1] if len(lines) > 1 else ""))
+    if prior_context_section:
+        lines = prior_context_section.split("\n", 1)
+        sections.append((lines[0], lines[1] if len(lines) > 1 else ""))
 
     return sections
 
@@ -8209,6 +8218,78 @@ def _apply_preflight_to_prompt(policy: PreflightPolicy) -> str:
     if not lines:
         return ""
     return "=== PREFLIGHT ===\n" + "\n".join(lines)
+
+
+def _extract_knowledge_from_round(
+    work: WorkReport,
+    review: ReviewReport | None = None,
+) -> KnowledgeUpdates:
+    """Extract patterns, pitfalls, and facts from a completed round."""
+    result: KnowledgeUpdates = {}
+    notes = str(work.get("notes", "")).strip()
+    # Extract patterns from worker notes (techniques mentioned with action verbs)
+    patterns: list[str] = []
+    for line in notes.split(". "):
+        line = line.strip()
+        if not line:
+            continue
+        if any(kw in line.lower() for kw in ("created", "implemented", "used", "added", "wrote", "fixed", "refactored")):
+            clean = line.rstrip(".").strip()
+            if len(clean) > 10 and len(clean) < 200:
+                patterns.append(clean)
+    if patterns:
+        result["patterns"] = patterns
+    # Extract pitfalls from review
+    if review is not None and isinstance(review, dict):
+        blocking = review.get("blocking_issues", [])
+        if isinstance(blocking, list) and blocking:
+            pitfalls: list[str] = []
+            for issue in blocking:
+                if isinstance(issue, dict):
+                    desc = str(issue.get("description", "") or issue.get("detail", "")).strip()
+                    if desc and len(desc) > 10:
+                        pitfalls.append(desc)
+                elif isinstance(issue, str) and issue.strip():
+                    pitfalls.append(issue.strip())
+            if pitfalls:
+                result["pitfalls"] = pitfalls
+        suggestions = review.get("non_blocking_suggestions", [])
+        if isinstance(suggestions, list) and suggestions:
+            existing = result.get("pitfalls", [])
+            for s in suggestions:
+                if isinstance(s, str) and s.strip() and len(s.strip()) > 10:
+                    existing.append("[suggestion] " + s.strip())
+            if existing:
+                result["pitfalls"] = existing
+    # Extract facts from worker notes (contextual statements)
+    if notes:
+        facts: list[str] = []
+        if len(notes) < 300:
+            facts.append(notes)
+        files = work.get("files_changed", [])
+        if files:
+            facts.append(f"Changed files: {', '.join(files)}")
+        if facts:
+            result["facts"] = facts
+    return result
+
+
+def _persist_knowledge_updates(updates: KnowledgeUpdates, paths: LoopPaths | None = None) -> None:
+    """Write extracted knowledge to local knowledge files."""
+    resolved_paths = _resolve_paths(paths)
+    pitfalls = updates.get("pitfalls")
+    if isinstance(pitfalls, list) and pitfalls:
+        try:
+            _append_pitfalls(pitfalls, paths=resolved_paths)
+        except OSError as e:
+            _log(f"Warning: failed to persist pitfalls: {e}")
+    patterns = updates.get("patterns")
+    if isinstance(patterns, list) and patterns:
+        entries = [_normalize_pattern_entry({"pattern": p, "category": "auto"}) for p in patterns]
+        try:
+            _write_patterns_jsonl(entries, paths=resolved_paths)
+        except OSError as e:
+            _log(f"Warning: failed to persist patterns: {e}")
 
 
 def _load_config_from_yaml(path: Path) -> dict:
@@ -12358,6 +12439,7 @@ def _single_round_handle_worker_noop(
         archive_before_save=archive_fn,
     )
     _write_task_card_status(config.task_path, TASK_STATUS_DONE, paths=resolved_paths)
+    knowledge_noop = _extract_knowledge_from_round(work, None)
     _write_round_summary(
         task_id=task_id,
         run_id=run_id,
@@ -12370,8 +12452,10 @@ def _single_round_handle_worker_noop(
         round_details=cast(list[dict], state.get("round_details", [])),
         decision="skipped_no_change",
         worker_notes=str(work.get("notes", "")),
+        knowledge_updates=knowledge_noop,
         paths=resolved_paths,
     )
+    _persist_knowledge_updates(knowledge_noop, paths=resolved_paths)
     _archive_task_summary(task_id, paths=resolved_paths)
     _feed_event(
         FEED_ROUND_COMPLETE,
@@ -12416,6 +12500,7 @@ def _single_round_handle_review_approved(
         archive_before_save=archive_fn,
     )
     _write_task_card_status(config.task_path, TASK_STATUS_DONE, paths=resolved_paths)
+    knowledge = _extract_knowledge_from_round(work, review)
     print(f"\n{'=' * 60}")
     print(f"  APPROVED at round {round_num}")
     print(f"  base: {base_sha[:8]}  head: {head_sha[:8]}")
@@ -12433,9 +12518,11 @@ def _single_round_handle_review_approved(
         decision=decision,
         worker_notes=str(work.get("notes", "")),
         duration_ms=int(work.get("duration_ms", 0)),
+        knowledge_updates=knowledge,
         paths=resolved_paths,
     )
     _archive_task_summary(task_id, paths=resolved_paths)
+    _persist_knowledge_updates(knowledge, paths=resolved_paths)
     _log("Task approved. Summary written to .loop/summary.json")
     _feed_event(
         FEED_ROUND_COMPLETE,
