@@ -1,5 +1,7 @@
 # agent-task-runner 集成规范 v1.0
 
+
+> **AOM implementation status:** Implemented (2025-07-02, Phases 1-4). See `aom pipeline-loop`, `aom session spawn` auto-redirect, and `internal/cli/pipeline_loop.go`.
 > **目标读者:** AOM (agent-orchestrator-management) 开发者
 > **定位:** AOM 通过本规范调用 agent-task-runner 的 PM→Worker→Reviewer 循环
 
