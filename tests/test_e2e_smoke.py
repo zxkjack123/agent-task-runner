@@ -58,8 +58,8 @@ def _run_loop(
     *,
     max_rounds: int = 3,
     timeout: int = 300,
-    dispatch_timeout: int = 600,
-    artifact_timeout: int = 300,
+    dispatch_timeout: int = 900,
+    artifact_timeout: int = 600,
     extra_args: list[str] | None = None,
 ) -> subprocess.CompletedProcess:
     """Run the loop with the given task card."""

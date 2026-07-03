@@ -344,6 +344,7 @@ DEFAULT_DISPATCH_TIMEOUT_SEC = 0
 DEFAULT_DISPATCH_ARTIFACT_TIMEOUT_SEC = 90
 DEFAULT_DISPATCH_RETRIES = 2
 DEFAULT_DISPATCH_RETRY_BASE_SEC = 5
+_DISPATCH_RETRY_WAIT_SEC = 30
 DEFAULT_MAX_SESSION_ROUNDS = 0
 DEFAULT_MAX_PARALLEL_WORKERS = 2
 DEFAULT_MAX_PARALLEL_WORKERS_CAP = 4
@@ -3417,20 +3418,25 @@ def _dispatch_with_artifact_fallback(
     try:
         dispatch_call()
     except DispatchTimeoutError as e:
-        _log(f"{role} dispatch timed out; checking {artifact_path.name} for task_id={task_id} round={round_num}")
-        data = _wait_for_file(
-            path=artifact_path,
-            description=f"{role} post-timeout artifact check",
-            timeout_sec=timeout_sec,
-            expected_task_id=task_id,
-            expected_round=round_num,
-            expected_run_id=expected_run_id,
-            show_manual_hint=False,
-        )
-        if data is not None:
-            _log(f"{role} dispatch timed out but {artifact_path.name} is present; continuing")
-            return data
-        raise RuntimeError(str(e)) from e
+        _log(f"{role} dispatch timed out; waiting {_DISPATCH_RETRY_WAIT_SEC}s then retrying")
+        time.sleep(_DISPATCH_RETRY_WAIT_SEC)
+        try:
+            dispatch_call()
+            _log(f"{role} dispatch retry succeeded")
+        except DispatchTimeoutError:
+            data = _wait_for_file(
+                path=artifact_path,
+                description=f"{role} post-timeout artifact check",
+                timeout_sec=timeout_sec,
+                expected_task_id=task_id,
+                expected_round=round_num,
+                expected_run_id=expected_run_id,
+                show_manual_hint=False,
+            )
+            if data is not None:
+                _log(f"{role} dispatch timed out but {artifact_path.name} is present; continuing")
+                return data
+            raise RuntimeError(str(e)) from e
     if artifact_path.exists():
         data = _read_json_if_exists(artifact_path)
         if isinstance(data, dict):

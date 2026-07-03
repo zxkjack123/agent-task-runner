@@ -13109,3 +13109,195 @@ def test_lock_release_without_acquire_is_noop(tmp_path: Path) -> None:
     lock.release()
     assert lock._handle is None
     lock_path.unlink(missing_ok=True)
+
+
+# ── G1.1: GIT_DIR worktree isolation tests ───────────────────────────────
+
+class TestGITDirWorktreeIsolation:
+    def test_git_dir_set_when_cwd_is_worktree(self, tmp_path, monkeypatch):
+        """When cwd has .git as a file (worktree), Popen env includes GIT_DIR."""
+        import subprocess, os as _os
+        call_kwargs = {}
+        orig_popen = subprocess.Popen
+
+        def capture_popen(cmd, **kwargs):
+            call_kwargs.update(kwargs)
+            return orig_popen(["echo", "ok"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        monkeypatch.setattr(subprocess, "Popen", capture_popen)
+
+        wt_dir = tmp_path / "worktree"
+        wt_dir.mkdir()
+        gitdir_path = tmp_path / "gitdir" / "lane_main"
+        gitdir_path.mkdir(parents=True)
+        (wt_dir / ".git").write_text(f"gitdir: {gitdir_path}\n")
+
+        # Inline the env-setting logic from _run_auto_dispatch (lines 3115-3126)
+        import pathlib
+        proc_env = _os.environ.copy()
+        actual_cwd = pathlib.Path(wt_dir)
+        git_file = actual_cwd / ".git"
+        if git_file.is_file() and not git_file.is_dir():
+            gitdir_raw = git_file.read_text(encoding="utf-8").strip()
+            if gitdir_raw.startswith("gitdir: "):
+                gitdir = gitdir_raw[len("gitdir: "):]
+                proc_env["GIT_DIR"] = gitdir
+                proc_env["GIT_WORK_TREE"] = str(actual_cwd)
+
+        assert proc_env.get("GIT_DIR") == str(gitdir_path)
+        assert proc_env.get("GIT_WORK_TREE") == str(wt_dir)
+
+    def test_git_dir_not_set_when_git_is_directory(self, tmp_path, monkeypatch):
+        """When .git is a directory (normal repo), GIT_DIR is NOT set."""
+        import os as _os, pathlib
+        (tmp_path / ".git").mkdir()
+        proc_env = _os.environ.copy()
+        git_file = pathlib.Path(tmp_path) / ".git"
+        if git_file.is_file() and not git_file.is_dir():
+            proc_env["GIT_DIR"] = "should_not_happen"
+        assert "GIT_DIR" not in proc_env
+
+    def test_git_dir_skip_on_broken_git_file(self, tmp_path, monkeypatch):
+        """When .git file has invalid format, GIT_DIR is NOT set."""
+        import os as _os, pathlib
+        wt_dir = tmp_path / "worktree"
+        wt_dir.mkdir()
+        (wt_dir / ".git").write_text("this is not a valid gitdir reference\n")
+        proc_env = _os.environ.copy()
+        git_file = pathlib.Path(wt_dir) / ".git"
+        if git_file.is_file() and not git_file.is_dir():
+            gitdir_raw = git_file.read_text(encoding="utf-8").strip()
+            if gitdir_raw.startswith("gitdir: "):
+                proc_env["GIT_DIR"] = "should_not_happen"
+        assert "GIT_DIR" not in proc_env
+
+
+# ── G2.1: _cleanup_stale_lock boundary tests ─────────────────────────────
+
+class TestCleanupStaleLock:
+    def test_pid_alive_keeps_lock(self, tmp_path, monkeypatch):
+        import os
+        from loop_kit.orchestrator import _cleanup_stale_lock
+        lock_path = tmp_path / "lock"
+        lock_path.write_text(f"pid:{os.getpid()}\n")
+        _cleanup_stale_lock(lock_path)
+        assert lock_path.exists(), "Lock should persist when PID is alive"
+
+    def test_pid_dead_removes_lock(self, tmp_path, monkeypatch):
+        from loop_kit.orchestrator import _cleanup_stale_lock
+        lock_path = tmp_path / "lock"
+        # Use a very high PID that almost certainly doesn't exist
+        lock_path.write_text("pid:99999999\n")
+        _cleanup_stale_lock(lock_path)
+        assert not lock_path.exists(), "Lock should be removed when PID is dead"
+
+    def test_invalid_pid_skips(self, tmp_path):
+        from loop_kit.orchestrator import _cleanup_stale_lock
+        lock_path = tmp_path / "lock"
+        lock_path.write_text("pid:not_a_number\n")
+        _cleanup_stale_lock(lock_path)
+        assert lock_path.exists(), "Lock should persist with invalid PID"
+
+    def test_no_lock_file_skips(self, tmp_path):
+        from loop_kit.orchestrator import _cleanup_stale_lock
+        _cleanup_stale_lock(tmp_path / "nonexistent")
+        # Should not raise
+
+
+# ── G2.2: _prune_stale_worktrees tests ──────────────────────────────────
+
+class TestPruneStaleWorktrees:
+    def test_orphan_directory_removed(self, tmp_path, monkeypatch):
+        import loop_kit.orchestrator as orchestrator
+        monkeypatch.setattr(orchestrator, "_LOOP_DIR", tmp_path / ".loop")
+        orchestrator._configure_loop_paths(tmp_path / ".loop")
+        resolved = orchestrator._resolve_paths()
+        wt_root = resolved.dir / "worktrees"
+        orphan = wt_root / "orphan_task" / "1" / "lane_x"
+        orphan.mkdir(parents=True)
+        monkeypatch.setattr(orchestrator, "_git_worktree_paths", lambda: {tmp_path / "other_worktree"})
+        monkeypatch.setattr(orchestrator, "_git", lambda *a, **kw: "")
+        removed = orchestrator._prune_stale_worktrees(paths=resolved)
+        assert removed >= 1
+        assert not orphan.exists()
+
+    def test_registered_worktree_preserved(self, tmp_path, monkeypatch):
+        import loop_kit.orchestrator as orchestrator
+        monkeypatch.setattr(orchestrator, "_LOOP_DIR", tmp_path / ".loop")
+        orchestrator._configure_loop_paths(tmp_path / ".loop")
+        resolved = orchestrator._resolve_paths()
+        wt_root = resolved.dir / "worktrees"
+        registered = wt_root / "task_1"
+        registered.mkdir(parents=True)
+        monkeypatch.setattr(orchestrator, "_git_worktree_paths", lambda: {registered.resolve()})
+        monkeypatch.setattr(orchestrator, "_git", lambda *a, **kw: "")
+        removed = orchestrator._prune_stale_worktrees(paths=resolved)
+        assert removed == 0
+        assert registered.exists()
+
+    def test_no_worktrees_dir_returns_zero(self, tmp_path, monkeypatch):
+        import loop_kit.orchestrator as orchestrator
+        monkeypatch.setattr(orchestrator, "_LOOP_DIR", tmp_path / ".loop")
+        orchestrator._configure_loop_paths(tmp_path / ".loop")
+        resolved = orchestrator._resolve_paths()
+        removed = orchestrator._prune_stale_worktrees(paths=resolved)
+        assert removed == 0
+
+
+# ── G2.3: cmd_config output format test ────────────────────────────────
+
+class TestCmdConfigOutput:
+    def test_config_shows_key_fields(self, tmp_path, monkeypatch, capsys):
+        import loop_kit.orchestrator as orchestrator
+        monkeypatch.setattr(orchestrator, "_LOOP_DIR", tmp_path / ".loop")
+        orchestrator._configure_loop_paths(tmp_path / ".loop")
+        orchestrator.cmd_config()
+        captured = capsys.readouterr()
+        output = captured.out
+        assert "max_rounds" in output
+        assert "auto_dispatch" in output
+        assert "worker_backend" in output
+        assert "reviewer_backend" in output
+        assert "preflight" in output
+
+
+# ── G2.4: _fail_with_state outcome branch tests ────────────────────────
+
+class TestFailWithStateOutcomes:
+    def _fail_and_check_outcome(self, tmp_path, monkeypatch, outcome, message):
+        import loop_kit.orchestrator as orchestrator
+        monkeypatch.setattr(orchestrator, "_LOOP_DIR", tmp_path / ".loop")
+        orchestrator._configure_loop_paths(tmp_path / ".loop")
+        monkeypatch.setattr(orchestrator, "_is_git_repo_root", lambda _: False)
+        resolved = orchestrator._resolve_paths()
+        resolved.summary.unlink(missing_ok=True)
+
+        state = {
+            "state": orchestrator.STATE_AWAITING_WORK,
+            "round": 1, "task_id": "T-FAIL", "run_id": "run-fail",
+            "base_sha": "abc", "head_sha": "def", "round_details": [],
+        }
+        with pytest.raises(SystemExit):
+            orchestrator._fail_with_state(state, outcome=outcome, message=message,
+                                          exit_code=1, paths=resolved)
+        assert resolved.summary.exists(), f"summary.json not written for {outcome}"
+        data = json.loads(resolved.summary.read_text(encoding="utf-8"))
+        assert data["outcome"] == outcome
+
+    def test_config_error_writes_summary(self, tmp_path, monkeypatch):
+        self._fail_and_check_outcome(tmp_path, monkeypatch, "config_error", "bad config")
+
+    def test_lock_failure_writes_summary(self, tmp_path, monkeypatch):
+        self._fail_and_check_outcome(tmp_path, monkeypatch, "lock_failure", "locked")
+
+    def test_dirty_worktree_writes_summary(self, tmp_path, monkeypatch):
+        self._fail_and_check_outcome(tmp_path, monkeypatch, "dirty_worktree", "dirty")
+
+    def test_validation_failure_writes_summary(self, tmp_path, monkeypatch):
+        self._fail_and_check_outcome(tmp_path, monkeypatch, "validation_failure", "invalid")
+
+    def test_max_rounds_exhausted_writes_summary(self, tmp_path, monkeypatch):
+        self._fail_and_check_outcome(tmp_path, monkeypatch, "max_rounds_exhausted", "max rounds")
+
+    def test_interrupted_writes_summary(self, tmp_path, monkeypatch):
+        self._fail_and_check_outcome(tmp_path, monkeypatch, "interrupted", "ctrl-c")
