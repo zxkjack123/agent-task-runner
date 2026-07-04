@@ -522,6 +522,8 @@ _KNOWN_CONFIG_KEYS: frozenset[str] = frozenset({
     "artifact_timeout",
     "worker_noop_as_error",
     "allow_dirty",
+    "clean_stale",
+    "cwd",
     "outcome_file",
     "verbose",
 })
@@ -598,6 +600,8 @@ class RunConfig:
     artifact_timeout: int = DEFAULT_DISPATCH_ARTIFACT_TIMEOUT_SEC
     worker_noop_as_error: bool = DEFAULT_WORKER_NOOP_AS_ERROR
     allow_dirty: bool = False
+    clean_stale: bool = False
+    cwd: str | None = None
     outcome_file: str | None = None
     verbose: bool = False
 
@@ -1032,6 +1036,33 @@ def _write_round_summary(
         json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
+    # Terminal event for observability
+    _emit_event(
+        "terminal",
+        {"outcome": outcome, "rounds": round_num, "decision": decision,
+         "task_id": task_id, "run_id": run_id,
+         "files_changed": files_changed, "exit_code": exit_code},
+        paths=resolved_paths,
+    )
+
+
+def _emit_event(
+    event_type: str,
+    payload: dict[str, object] | None = None,
+    *,
+    paths: LoopPaths | None = None,
+) -> None:
+    """Append a JSON event line to the events.jsonl stream."""
+    resolved_paths = _resolve_paths(paths)
+    event_file = resolved_paths.dir / "events.jsonl"
+    data: dict[str, object] = {"event": event_type, "ts": _ts()}
+    if payload:
+        data.update(payload)
+    try:
+        with event_file.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(data, ensure_ascii=False, sort_keys=True) + "\n")
+    except OSError:
+        pass  # best-effort, never block on event I/O
 
 
 def _archive_state_for_round(
@@ -6512,6 +6543,12 @@ def _apply_state_transition(
     if archive_before_save is not None:
         archive_before_save()
     _save_state(state, paths=paths)
+    _emit_event(
+        "state_change",
+        {"state": rule.target_state, "round": state.get("round"),
+         "task_id": state.get("task_id"), "run_id": state.get("run_id")},
+        paths=paths,
+    )
     event_from_state = from_state if isinstance(from_state, str) else normalized_from_state
     if event_from_state != rule.target_state or from_round != to_round:
         _emit_state_transition_event(
@@ -6545,6 +6582,12 @@ def _lane_task_component(task_id: str) -> str:
 
 
 def _lane_worktrees_task_dir(task_id: str, *, paths: LoopPaths | None = None) -> Path:
+    """Return the worktrees directory for a task.
+
+    @deprecated: worktree management belongs in AOM. This function is retained
+    for backward compatibility with existing worktree-aware code paths.
+    New code should use --cwd to specify the worktree directory directly.
+    """
     resolved_paths = _resolve_paths(paths)
     return resolved_paths.dir / _LANE_WORKTREES_DIRNAME / _lane_task_component(task_id)
 
@@ -6674,6 +6717,25 @@ def _prune_stale_worktrees(paths: LoopPaths | None = None) -> int:
             removed += 1
             _log(f"Pruned orphan worktree directory: {entry}")
     return removed
+
+
+def _clean_stale_loop_state(paths: LoopPaths | None = None) -> None:
+    """Remove stale state.json and bus files from a crashed/interrupted run."""
+    resolved_paths = _resolve_paths(paths)
+    for p in [
+        resolved_paths.state,
+        resolved_paths.work_report,
+        resolved_paths.review_request,
+        resolved_paths.review_report,
+        resolved_paths.fix_list,
+        resolved_paths.summary,
+    ]:
+        with contextlib.suppress(OSError):
+            p.unlink(missing_ok=True)
+    state_backup = resolved_paths.dir / ".state.json.bak"
+    with contextlib.suppress(OSError):
+        state_backup.unlink(missing_ok=True)
+    _log("Cleaned stale loop state files")
 
 
 def _cleanup_lane_worktrees_for_round(
@@ -11853,6 +11915,24 @@ def _run_multi_round_via_subprocess(
     if not worktree_checked:
         _enforce_clean_worktree_or_exit(allow_dirty=config.allow_dirty)
 
+    if resume_from_state is None:
+        stale = _load_state(paths=resolved_paths)
+        stale_state = stale.get("state")
+        stale_round = stale.get("round", 0)
+        if stale_state not in (None, STATE_IDLE, STATE_DONE):
+            if config.clean_stale:
+                _log(f"Stale state detected ({stale_state}), cleaning per --clean-stale")
+                _clean_stale_loop_state(paths=resolved_paths)
+            elif stale_state == STATE_AWAITING_REVIEW:
+                _log(f"Stale state: {stale_state} at round {stale_round} — auto-resuming from reviewer")
+                resume_from_state = stale
+            elif stale_state == STATE_AWAITING_WORK and isinstance(stale_round, int) and stale_round > 1:
+                _log(f"Stale state: {stale_state} at round {stale_round} — auto-resuming from worker")
+                resume_from_state = stale
+            else:
+                _log(f"Stale state: {stale_state} at round {stale_round} — cleaning and restarting")
+                _clean_stale_loop_state(paths=resolved_paths)
+
     start_round = 1
     task_id = ""
     base_sha = ""
@@ -12936,6 +13016,12 @@ def main() -> None:
     run_p.add_argument("--single-round", action="store_true", help="Run exactly one round and exit")
     run_p.add_argument("--round", type=int, help="Round number for --single-round mode")
     run_p.add_argument("--allow-dirty", action="store_true", help="Allow run to start with dirty tracked git files")
+    run_p.add_argument("--clean-stale", action="store_true", help="Force-clean stale state.json and bus files from crashed runs")
+    run_p.add_argument(
+        "--cwd",
+        default=None,
+        help="Working directory for task execution (default: repo root). AOM sets this to the provisioned worktree.",
+    )
     run_p.add_argument(
         "--outcome-file",
         default=None,
@@ -13113,6 +13199,8 @@ def main() -> None:
                     field_name="worker_noop_as_error",
                 ),
                 allow_dirty=args.allow_dirty,
+                clean_stale=args.clean_stale,
+                cwd=args.cwd,
                 outcome_file=args.outcome_file,
                 verbose=args.verbose,
             )
