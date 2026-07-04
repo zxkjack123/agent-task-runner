@@ -43,3 +43,30 @@
 - 6 fail_with_state outcome branch tests
 - 1 cmd_config format test
 - Lint: py_compile OK, import OK
+
+## v0.5.0 (2026-07-03)
+
+### Observability
+- **Event stream**: `_emit_event` appends JSONL events to `events.jsonl` on every state transition and terminal outcome
+- Events: `state_change` (state/round/task_id/run_id), `terminal` (outcome/rounds/decision/exit_code/files_changed)
+- AOM can `tail -f events.jsonl` for real-time progress
+
+### Worktree Simplification
+- `--cwd` CLI argument lets AOM specify the provisioned worktree directory
+- `_lane_worktrees_*` functions marked `@deprecated` — worktree management delegated to AOM
+- agent-task-runner no longer creates or manages git worktrees
+
+### Failure Recovery
+- `_detect_stale_state` detects leftover state.json from crashed runs
+- Auto-resume: `awaiting_review` → continue from reviewer; `awaiting_work round>1` → continue from worker
+- Auto-clean: other stale states → clean bus files and restart
+- `--clean-stale` CLI arg for forced cleanup of all bus files
+- `_clean_stale_loop_state` removes state.json + all bus files
+
+### Gap Closure
+- GIT_DIR worktree isolation tests (3 tests)
+- `_cleanup_stale_lock` boundary tests (4 tests)
+- `_prune_stale_worktrees` GC tests (3 tests)
+- `_fail_with_state` outcome branch tests (6 tests)
+- `cmd_config` output format test
+- Dispatch retry: `_dispatch_with_artifact_fallback` retries once (30s wait)
