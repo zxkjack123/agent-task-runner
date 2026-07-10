@@ -265,3 +265,50 @@ class TestOutcomeFileCli:
         _setup_loop_dir(monkeypatch, tmp_path)
         _copy_outcome_file(None, paths=_resolve_paths())
         # Should not raise, no side effects
+
+
+# ── Phase 3: ATR mock full chain tests ─────────────────────────────────
+
+class TestATRFullChain:
+    def test_write_round_summary_fields(self, tmp_path, monkeypatch):
+        """_write_round_summary writes all expected outcome fields."""
+        import loop_kit.orchestrator as orch
+        ld = tmp_path / ".loop"; ld.mkdir(parents=True)
+        monkeypatch.setattr(orch, "_LOOP_DIR", ld)
+        orch._configure_loop_paths(ld)
+        paths = orch._resolve_paths()
+
+        orch._write_round_summary(
+            task_id="T-FC-1", run_id="run-fc", outcome="approved",
+            round_num=2, base_sha="abc", head_sha="def",
+            files_changed=["x.py"], review_non_blocking=["tip"],
+            round_details=[], exit_code=0, decision="approve",
+            worker_notes="done", duration_ms=5000,
+            paths=paths,
+        )
+        assert paths.summary.exists()
+        data = json.loads(paths.summary.read_text(encoding="utf-8"))
+        assert data["outcome"] == "approved"
+        assert data["exit_code"] == 0
+        assert data["decision"] == "approve"
+        assert data["rounds"] == 2
+        assert "x.py" in data["files_changed"]
+
+    def test_emit_event_produces_events_jsonl(self, tmp_path, monkeypatch):
+        """_emit_event writes JSONL lines to events.jsonl."""
+        import loop_kit.orchestrator as orch
+        ld = tmp_path / ".loop"; ld.mkdir(parents=True)
+        monkeypatch.setattr(orch, "_LOOP_DIR", ld)
+        orch._configure_loop_paths(ld)
+        paths = orch._resolve_paths()
+        events_file = paths.dir / "events.jsonl"
+
+        orch._emit_event("state_change", {"state": "awaiting_work", "round": 1}, paths=paths)
+        orch._emit_event("terminal", {"outcome": "approved"}, paths=paths)
+
+        assert events_file.exists()
+        lines = events_file.read_text(encoding="utf-8").strip().split("\n")
+        assert len(lines) == 2
+        e1 = json.loads(lines[0])
+        assert e1["event"] == "state_change"
+        assert e1["state"] == "awaiting_work"
