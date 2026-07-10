@@ -78,3 +78,27 @@
 - **Outcome mapping** (`bridge.py:OUTCOME_TO_PM_STATUS`) unified with AOM `pipeline_loop.go`
 - **Event stream** (`bridge.py:read_latest_events`) for real-time feedback via `events.jsonl`
 - **pm-agent-runner** marked as `@deprecated` — auto task execution now routes through `bridge.py` directly
+
+## v0.6.0 (2026-07-11)
+
+### PM/AOM Full-Chain Integration
+- **Full-chain E2E tests**: 11 PM→ATR→PM chain tests + 2 ATR mock tests + 2 Go sync tests
+- **pm_outcome_handler.py**: AOM pipeline-loop → PM status sync script
+- **events.jsonl consumer**: `read_latest_events()` in PM cron dispatcher
+- **OUTCOME_TO_PM_STATUS**: unified mapping validated with 11-outcome test
+- **Priority queue**: pick_queued() with due_date + priority scoring
+- **Concurrent control**: _MAX_CONCURRENT=1 with running task detection
+
+### Documentation
+- **System architecture doc**: full ecosystem topology with ASCII diagram
+- **AOM README**: Agent Task Runner integration section with pipeline-loop docs
+- **PM integration doc**: v3→v4 with P0+P1 changes
+- **MCP tool reference**: ATR-triggering tools + exclusion tags
+- **Migration guide**: pm-agent-runner → bridge.py
+- **opencode-tasks coexistence**: documented scheduling differences
+
+### Test Coverage
+- ATR: 591 tests (586 unit + 3 integration + 2 mock)
+- PM bridge: 18 full-chain tests
+- AOM Go: 18 tests
+- **Total: 627 passing across 3 repos**
