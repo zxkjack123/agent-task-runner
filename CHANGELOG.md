@@ -70,3 +70,11 @@
 - `_fail_with_state` outcome branch tests (6 tests)
 - `cmd_config` output format test
 - Dispatch retry: `_dispatch_with_artifact_fallback` retries once (30s wait)
+
+### P0+P1 Integration (2026-07-10)
+
+- **PM dispatcher** (`bridge.py:dispatch_atr`) now passes `--outcome-file` and `--cwd` to ATR
+- **Result detection** (`bridge.py:check_and_handle_results`) prefers `summary.json` over `state.json` polling — eliminates 5-minute latency
+- **Outcome mapping** (`bridge.py:OUTCOME_TO_PM_STATUS`) unified with AOM `pipeline_loop.go`
+- **Event stream** (`bridge.py:read_latest_events`) for real-time feedback via `events.jsonl`
+- **pm-agent-runner** marked as `@deprecated` — auto task execution now routes through `bridge.py` directly
