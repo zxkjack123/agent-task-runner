@@ -5800,6 +5800,14 @@ DEFAULT_WORKER_PROMPT_TEMPLATE = (
     "=== KNOWLEDGE ===\n{knowledge_section}\n\n"
     "=== TASK PACKET ===\n{task_packet_section}\n\n"
     "{task_card_section}{prior_context_section}"
+    "\n\n=== POST-EXECUTION PHYSICAL QUANTITY VERIFICATION ===\n"
+    "After writing the work report but before delivering, run:\n"
+    "  python3 /home/gw/opt/copilot-agents/scripts/benchmark_physical_quantities.py \\\n"
+    "    --extract-from-text <your-work-report-content>\n"
+    "\n"
+    "If FAIL for any quantity → STOP. Do not deliver. Fix the value.\n"
+    "If PASS for all → proceed to delivery.\n"
+    "If script not available → note [PHYSICAL VERIFICATION SKIPPED] in work report.\n"
 )
 
 
