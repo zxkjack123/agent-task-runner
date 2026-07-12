@@ -1202,9 +1202,6 @@ class _LoopLock:
         except OSError as e:
             handle.close()
             raise RuntimeError(f"another orchestrator instance is already running ({self.path})") from e
-        except Exception:
-            handle.close()
-            raise
 
     def release(self) -> None:
         handle = self._handle
@@ -4763,9 +4760,11 @@ def _format_metric_ms(value: float | None) -> str:
 
 def _atomic_write_text(path: Path, payload: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
+    tmp = path.with_suffix(path.suffix + ".tmp")
     try:
         tmp.write_text(payload, encoding="utf-8")
+        with tmp.open("r+b") as _f:
+            os.fsync(_f.fileno())
         try:
             tmp.replace(path)
         except PermissionError:
@@ -4774,7 +4773,7 @@ def _atomic_write_text(path: Path, payload: str) -> None:
                 tmp.replace(path)
             else:
                 raise
-    except BaseException:
+    except (OSError, ValueError):
         tmp.unlink(missing_ok=True)
         raise
 

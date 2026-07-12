@@ -11713,7 +11713,7 @@ class TestKnowledgeLayer:
 
         def _failing_replace(self_path, other_path):
             other = other_path if isinstance(other_path, Path) else Path(other_path)
-            if self_path.name == "patterns.tmp" and other.name == "patterns.jsonl":
+            if self_path.name == "patterns.jsonl.tmp" and other.name == "patterns.jsonl":
                 raise OSError("simulated interrupted patterns replace")
             return original_replace(self_path, other_path)
 
