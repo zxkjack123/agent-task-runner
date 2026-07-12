@@ -1113,10 +1113,22 @@ def _execute_verification_check(verification: VerificationSpec) -> VerificationR
     timeout_sec = int(verification.get("timeout_sec", _VERIFICATION_DEFAULT_TIMEOUT_SEC) or _VERIFICATION_DEFAULT_TIMEOUT_SEC)
     cwd_raw = verification.get("cwd")
     cwd = str(ROOT) if not cwd_raw else str(cwd_raw)
+    import shlex
+
+    try:
+        cmd_list = shlex.split(cmd, posix=(os.name != "nt"))
+    except ValueError:
+        return {
+            "passed": False,
+            "output": f"(invalid command: {cmd[:100]})",
+            "exit_code": -1,
+            "command": cmd,
+            "expected_output": expected,
+        }
     try:
         result = subprocess.run(
-            cmd,
-            shell=True,
+            cmd_list,
+            shell=False,
             capture_output=True,
             text=True,
             timeout=timeout_sec,
