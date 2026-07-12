@@ -9461,13 +9461,13 @@ class TestAtomicWriteJson:
     def test_no_tmp_left_on_failure(self, tmp_path, monkeypatch) -> None:
         target = tmp_path / "out.json"
         # Pre-create the tmp file to verify it gets cleaned up
-        tmp = target.with_suffix(".tmp")
+        tmp = target.with_suffix(target.suffix + ".tmp")
         tmp.write_text("garbage", encoding="utf-8")
         # Make write_text on the tmp path raise
         original_write_text = orchestrator.Path.write_text
 
         def _failing_write_text(self_path, *args, **kwargs):
-            if self_path.suffix == ".tmp":
+            if self_path.suffix == ".tmp" and self_path.name.endswith(".json.tmp"):
                 raise OSError("simulated write failure")
             return original_write_text(self_path, *args, **kwargs)
 
@@ -9515,8 +9515,8 @@ class TestWritePatternsJsonl:
         assert len(payload) == 1
         row = json.loads(payload[0])
         assert row == {"pattern": "new", "category": "workflow", "confidence": 0.9}
-        assert ("patterns.tmp", "patterns.jsonl") in replace_calls
-        assert not target.with_suffix(".tmp").exists()
+        assert ("patterns.jsonl.tmp", "patterns.jsonl") in replace_calls
+        assert not target.with_suffix(target.suffix + ".tmp").exists()
 
 
 class TestCmdExtractDiffValidation:
@@ -11648,7 +11648,7 @@ class TestKnowledgeLayer:
         original_write_text = orchestrator.Path.write_text
 
         def _failing_write_text(self_path, *args, **kwargs):
-            if self_path.name == "pitfalls.tmp":
+            if self_path.name == "pitfalls.md.tmp":
                 raise OSError("simulated interrupted pitfalls write")
             return original_write_text(self_path, *args, **kwargs)
 
@@ -11658,7 +11658,7 @@ class TestKnowledgeLayer:
             orchestrator._update_knowledge_on_approval("T-741", 2)
 
         assert (context_dir / "pitfalls.md").read_text(encoding="utf-8") == original_pitfalls
-        assert not (context_dir / "pitfalls.tmp").exists()
+        assert not (context_dir / "pitfalls.md.tmp").exists()
         assert not (context_dir / "patterns.jsonl").exists()
 
     def test_update_knowledge_on_approval_interrupted_patterns_write_keeps_jsonl_intact(
