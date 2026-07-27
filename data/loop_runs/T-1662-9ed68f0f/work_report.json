@@ -1,0 +1,26 @@
+{
+  "task_id": "T-1662",
+  "run_id": "run-cb998ef18a3145e48fc90b73a07996c0",
+  "output_files": [
+    "data/loop_runs/T-1662-9ed68f0f/weekly_summary.md"
+  ],
+  "steps": [
+    "scanned agent-task-runner git log for week July 7-13 (51 commits)",
+    "read .loop/events.jsonl for E2E task execution history (14+ runs)",
+    "read .loop/handoff/ for worker/reviewer reports",
+    "read .loop/summary.json for final E2E outcomes",
+    "scanned 17 active Git repos across /home/gw/opt/ for weekly changes",
+    "queried PM system for doing tasks (294 active)",
+    "synthesized weekly_summary.md with structured multi-source report"
+  ],
+  "data_sources": [
+    "agent-task-runner git log (51 commits)",
+    ".loop/events.jsonl (event stream)",
+    ".loop/handoff/ (worker/reviewer reports)",
+    ".loop/summary.json (final E2E summary)",
+    "cross-project git scan (17 repos)",
+    "PM task system (294 doing tasks)"
+  ],
+  "notes": "本周 17 个活跃仓库有提交。agent-task-runner 51 次提交，E2E-1PLUS1 经 14 次运行后 approve 结案。核心修复: BaseException 恢复、fsync 添加、shell=True 安全修复。fusion-agent-fleet 首次 release。PM 系统 294 个活跃任务推进中。",
+  "round": 1
+}

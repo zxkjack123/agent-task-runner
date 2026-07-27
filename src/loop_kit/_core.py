@@ -8,7 +8,6 @@ Do not import from this module directly — use the focused modules or
 the orchestrator.py facade instead.
 """
 
-
 import argparse
 import ast
 import concurrent.futures
@@ -402,11 +401,11 @@ _SERIAL_LANE_ID = "__serial__"
 _BACKEND_TOKEN_COST_CENTS_PER_MILLION: dict[str, tuple[int, int]] = {
     BACKEND_CODEX: (150, 600),
     BACKEND_CLAUDE: (300, 1500),
-    BACKEND_OPENCODE: (0, 0),
+    BACKEND_OPENCODE: (43, 87),  # deepseek-v4-pro via direct API: $0.435/$0.87 per 1M tokens
 }
 DISPATCH_BACKEND_NATIVE = "native"
-DEFAULT_WORKER_BACKEND = BACKEND_CODEX
-DEFAULT_REVIEWER_BACKEND = BACKEND_CODEX
+DEFAULT_WORKER_BACKEND = BACKEND_OPENCODE
+DEFAULT_REVIEWER_BACKEND = BACKEND_OPENCODE
 DEFAULT_DISPATCH_BACKEND = DISPATCH_BACKEND_NATIVE
 _TERMINAL_SUCCESS_OUTCOMES = frozenset({"approved", "no_change_success"})
 
@@ -502,31 +501,33 @@ _LANE_EXCEPTION_MESSAGE_MAX_LEN = 300
 _LANE_EXCEPTION_TRACEBACK_MAX_LEN = 4000
 _TRACEBACK_TRUNCATION_MARKER = "\n...[truncated]...\n"
 _MAX_DIFF_CHARS = 50000
-_KNOWN_CONFIG_KEYS: frozenset[str] = frozenset({
-    "task_path",
-    "max_rounds",
-    "timeout",
-    "require_heartbeat",
-    "heartbeat_ttl",
-    "auto_dispatch",
-    "dispatch_backend",
-    "worker_backend",
-    "reviewer_backend",
-    "backend_preference",
-    "dispatch_timeout",
-    "dispatch_retries",
-    "dispatch_retry_base_sec",
-    "max_session_rounds",
-    "max_parallel_workers",
-    "aggressive_parallelism",
-    "artifact_timeout",
-    "worker_noop_as_error",
-    "allow_dirty",
-    "clean_stale",
-    "cwd",
-    "outcome_file",
-    "verbose",
-})
+_KNOWN_CONFIG_KEYS: frozenset[str] = frozenset(
+    {
+        "task_path",
+        "max_rounds",
+        "timeout",
+        "require_heartbeat",
+        "heartbeat_ttl",
+        "auto_dispatch",
+        "dispatch_backend",
+        "worker_backend",
+        "reviewer_backend",
+        "backend_preference",
+        "dispatch_timeout",
+        "dispatch_retries",
+        "dispatch_retry_base_sec",
+        "max_session_rounds",
+        "max_parallel_workers",
+        "aggressive_parallelism",
+        "artifact_timeout",
+        "worker_noop_as_error",
+        "allow_dirty",
+        "clean_stale",
+        "cwd",
+        "outcome_file",
+        "verbose",
+    }
+)
 _VALID_REVIEW_DECISIONS: frozenset[str] = frozenset({"approve", "changes_required", "skipped_no_change"})
 
 
@@ -1039,9 +1040,15 @@ def _write_round_summary(
     # Terminal event for observability
     _emit_event(
         "terminal",
-        {"outcome": outcome, "rounds": round_num, "decision": decision,
-         "task_id": task_id, "run_id": run_id,
-         "files_changed": files_changed, "exit_code": exit_code},
+        {
+            "outcome": outcome,
+            "rounds": round_num,
+            "decision": decision,
+            "task_id": task_id,
+            "run_id": run_id,
+            "files_changed": files_changed,
+            "exit_code": exit_code,
+        },
         paths=resolved_paths,
     )
 
@@ -1110,7 +1117,9 @@ def _execute_verification_check(verification: VerificationSpec) -> VerificationR
     if not cmd:
         return {"passed": False, "output": "(no command)", "exit_code": -1, "command": "", "expected_output": ""}
     expected = str(verification.get("expected_output", "")).strip()
-    timeout_sec = int(verification.get("timeout_sec", _VERIFICATION_DEFAULT_TIMEOUT_SEC) or _VERIFICATION_DEFAULT_TIMEOUT_SEC)
+    timeout_sec = int(
+        verification.get("timeout_sec", _VERIFICATION_DEFAULT_TIMEOUT_SEC) or _VERIFICATION_DEFAULT_TIMEOUT_SEC
+    )
     cwd_raw = verification.get("cwd")
     cwd = str(ROOT) if not cwd_raw else str(cwd_raw)
     import shlex
@@ -1681,9 +1690,7 @@ def _build_exception_diagnostics(exc: BaseException) -> ExceptionDiagnostics:
     }
 
 
-def _exception_summary_text(
-    diagnostics: ExceptionDiagnostics, *, max_len: int = _LANE_FAILURE_SUMMARY_MAX_LEN
-) -> str:
+def _exception_summary_text(diagnostics: ExceptionDiagnostics, *, max_len: int = _LANE_FAILURE_SUMMARY_MAX_LEN) -> str:
     exception_type = diagnostics["type"].strip() or "Exception"
     message = diagnostics["message"].strip()
     summary = f"{exception_type}: {message}" if message else exception_type
@@ -2467,10 +2474,7 @@ def _git_is_ancestor(
         return True
     if result.returncode == 1:
         return False
-    raise RuntimeError(
-        "git merge-base --is-ancestor "
-        f"{ancestor_ref} {descendant_ref} failed: {result.stderr.strip()}"
-    )
+    raise RuntimeError(f"git merge-base --is-ancestor {ancestor_ref} {descendant_ref} failed: {result.stderr.strip()}")
 
 
 def _require_registered_parse_event(backend: str) -> BackendParseEventFn:
@@ -3160,7 +3164,7 @@ def _run_auto_dispatch(
                 try:
                     gitdir_raw = git_file.read_text(encoding="utf-8").strip()
                     if gitdir_raw.startswith("gitdir: "):
-                        gitdir = gitdir_raw[len("gitdir: "):]
+                        gitdir = gitdir_raw[len("gitdir: ") :]
                         proc_env["GIT_DIR"] = gitdir
                         proc_env["GIT_WORK_TREE"] = str(actual_cwd)
                 except OSError:
@@ -5177,13 +5181,17 @@ def cmd_knowledge_stats() -> None:
     pitfall_entries = _load_pitfalls()
     patterns, stale_patterns = _load_patterns_with_governance(persist=False)
     fact_stale = sum(
-        1 for f in fact_entries
-        if isinstance(f.get("source_version"), str) and isinstance(f.get("last_verified"), str)
+        1
+        for f in fact_entries
+        if isinstance(f.get("source_version"), str)
+        and isinstance(f.get("last_verified"), str)
         and f.get("source_version", "") != f.get("last_verified", "")
     )
     pitfall_stale = sum(
-        1 for p in pitfall_entries
-        if isinstance(p.get("source_version"), str) and isinstance(p.get("last_verified"), str)
+        1
+        for p in pitfall_entries
+        if isinstance(p.get("source_version"), str)
+        and isinstance(p.get("last_verified"), str)
         and p.get("source_version", "") != p.get("last_verified", "")
     )
     high_confidence = sum(
@@ -5342,11 +5350,7 @@ def _render_knowledge_section(
         facts_end = len(selected_facts)
         pitfalls_end = facts_end + len(selected_pitfalls)
         remaining_facts = all_entries[:facts_end] if facts_end > 0 else []
-        remaining_pitfalls = (
-            all_entries[facts_end:pitfalls_end]
-            if pitfalls_end > facts_end
-            else []
-        )
+        remaining_pitfalls = all_entries[facts_end:pitfalls_end] if pitfalls_end > facts_end else []
         remaining_patterns = all_entries[pitfalls_end:] if len(all_entries) > pitfalls_end else []
         if not remaining_facts and not remaining_pitfalls and not remaining_patterns:
             return "- <none>"
@@ -6456,10 +6460,19 @@ def _save_state(state: dict, paths: LoopPaths | None = None) -> None:
             previous_state = previous
         state_backup.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(state_file, state_backup)
-        _STATE_CMP_KEYS = ("state", "round", "outcome", "task_id", "run_id", "base_sha", "head_sha", "sessions", "lane_state", "head_sha_history")
-        if previous_state is not None and all(
-            previous_state.get(k) == state_to_save.get(k) for k in _STATE_CMP_KEYS
-        ):
+        _STATE_CMP_KEYS = (
+            "state",
+            "round",
+            "outcome",
+            "task_id",
+            "run_id",
+            "base_sha",
+            "head_sha",
+            "sessions",
+            "lane_state",
+            "head_sha_history",
+        )
+        if previous_state is not None and all(previous_state.get(k) == state_to_save.get(k) for k in _STATE_CMP_KEYS):
             return
     _atomic_write_json(state_file, state_to_save)
 
@@ -6564,8 +6577,12 @@ def _apply_state_transition(
     _save_state(state, paths=paths)
     _emit_event(
         "state_change",
-        {"state": rule.target_state, "round": state.get("round"),
-         "task_id": state.get("task_id"), "run_id": state.get("run_id")},
+        {
+            "state": rule.target_state,
+            "round": state.get("round"),
+            "task_id": state.get("task_id"),
+            "run_id": state.get("run_id"),
+        },
         paths=paths,
     )
     event_from_state = from_state if isinstance(from_state, str) else normalized_from_state
@@ -7223,7 +7240,9 @@ def _lane_preflight_conflict_summary(*, lane_id: str, preflight: LaneMergePrefli
         other_lane_id = right_lane_id if lane_id == left_lane_id else left_lane_id
         raw_paths = item.get("overlapping_paths", [])
         raw_commits = item.get("overlapping_commits", [])
-        overlap_paths = [str(path).strip() for path in raw_paths if str(path).strip()] if isinstance(raw_paths, list) else []
+        overlap_paths = (
+            [str(path).strip() for path in raw_paths if str(path).strip()] if isinstance(raw_paths, list) else []
+        )
         overlap_commits = (
             [str(commit).strip() for commit in raw_commits if str(commit).strip()]
             if isinstance(raw_commits, list)
@@ -7270,16 +7289,12 @@ def _cherry_pick_lane_reports(
                 all_already_integrated = False
                 break
         if all_already_integrated:
-            _log(
-                f"Lane merge: all lane commits already integrated "
-                f"(base={base_sha[:8]}, head={current_head[:8]})"
-            )
+            _log(f"Lane merge: all lane commits already integrated (base={base_sha[:8]}, head={current_head[:8]})")
         elif preflight is not None and preflight.get("allow_head_mismatch"):
             _log(f"Lane merge: HEAD moved during lane execution (base={base_sha[:8]}, head={current_head[:8]})")
         else:
             raise ValidationError(
-                "Lane merge requires clean base head before cherry-pick: "
-                f"expected {base_sha}, got {current_head}"
+                f"Lane merge requires clean base head before cherry-pick: expected {base_sha}, got {current_head}"
             )
     if conflict_policy not in _LANE_MERGE_CONFLICT_POLICY_CHOICES:
         raise ValidationError(
@@ -7351,9 +7366,7 @@ def _cherry_pick_lane_reports(
                 try:
                     _restore_merge_head_after_failure(base_sha)
                 except RuntimeError as restore_error:
-                    raise RuntimeError(
-                        f"{conflict_message}; fail-fast cleanup failed: {restore_error}"
-                    ) from e
+                    raise RuntimeError(f"{conflict_message}; fail-fast cleanup failed: {restore_error}") from e
                 raise RuntimeError(
                     "Lane merge failed for lane "
                     f"'{lane_id}' on commit {commit_sha} (policy={conflict_policy}; {preflight_summary}): {e}"
@@ -7385,9 +7398,7 @@ def _cherry_pick_lane_reports(
                     with contextlib.suppress(RuntimeError):
                         _git("cherry-pick", "--abort")
                     preflight_summary = _lane_preflight_conflict_summary(lane_id=lane_id, preflight=preflight)
-                    deferred_failures.append(
-                        f"lane '{lane_id}' commit {commit_sha} ({preflight_summary}): {e}"
-                    )
+                    deferred_failures.append(f"lane '{lane_id}' commit {commit_sha} ({preflight_summary}): {e}")
                     _log(
                         f"Lane deferred replay conflict for lane '{lane_id}' on commit {commit_sha} "
                         f"(policy={conflict_policy}; {preflight_summary}): {e}"
@@ -7397,12 +7408,12 @@ def _cherry_pick_lane_reports(
             if lane_conflict:
                 lane_record["status"] = "deferred_conflict"
             else:
-                lane_record["status"] = "applied_after_defer" if lane_record["applied_commits"] else "already_integrated"
+                lane_record["status"] = (
+                    "applied_after_defer" if lane_record["applied_commits"] else "already_integrated"
+                )
             current_head = _current_sha()
         if deferred_failures:
-            raise RuntimeError(
-                "Lane merge failed after deferred replay conflicts: " + "; ".join(deferred_failures)
-            )
+            raise RuntimeError("Lane merge failed after deferred replay conflicts: " + "; ".join(deferred_failures))
 
     return current_head, merge_records
 
@@ -7460,9 +7471,7 @@ def _run_integration_acceptance_checks(
 
     failures = [test["name"] for test in checks if test.get("result") != "pass"]
     if failures:
-        raise ValidationError(
-            "Integration acceptance checks failed on merged head: " + ", ".join(failures)
-        )
+        raise ValidationError("Integration acceptance checks failed on merged head: " + ", ".join(failures))
     return checks
 
 
@@ -8157,9 +8166,13 @@ def _render_dependency_dag_mermaid(snapshot: _TaskDependencySnapshot) -> list[st
         seen.add(task_id)
         status = snapshot.status_by_task.get(task_id, "unknown")
         style = (
-            "Done" if status == "done" else
-            "InProgress" if status in ("in_progress", "awaiting_work", "awaiting_review") else
-            "Blocked" if status == "blocked" else "Unknown"
+            "Done"
+            if status == "done"
+            else "InProgress"
+            if status in ("in_progress", "awaiting_work", "awaiting_review")
+            else "Blocked"
+            if status == "blocked"
+            else "Unknown"
         )
         lines.append(f'    {task_id}("{task_id} [{status}]")')
         class_text = f"class {task_id} task{style}"
@@ -8320,7 +8333,9 @@ def _extract_knowledge_from_round(
         line = line.strip()
         if not line:
             continue
-        if any(kw in line.lower() for kw in ("created", "implemented", "used", "added", "wrote", "fixed", "refactored")):
+        if any(
+            kw in line.lower() for kw in ("created", "implemented", "used", "added", "wrote", "fixed", "refactored")
+        ):
             clean = line.rstrip(".").strip()
             if len(clean) > 10 and len(clean) < 200:
                 patterns.append(clean)
@@ -8503,10 +8518,7 @@ def _validate_run_config(config: RunConfig) -> None:
         ("aggressive_parallelism", config.aggressive_parallelism),
     ):
         _coerce_bool_config(value, field_name=bool_name)
-    if (
-        not config.aggressive_parallelism
-        and config.max_parallel_workers > DEFAULT_MAX_PARALLEL_WORKERS_CAP
-    ):
+    if not config.aggressive_parallelism and config.max_parallel_workers > DEFAULT_MAX_PARALLEL_WORKERS_CAP:
         raise ValidationError(
             "max_parallel_workers exceeds safe cap: "
             f"{config.max_parallel_workers} > {DEFAULT_MAX_PARALLEL_WORKERS_CAP}. "
@@ -8616,12 +8628,27 @@ def _validate_report(
             "round": int,
         }
         prefix = "work_report"
-        known_keys: frozenset[str] = frozenset({
-            "task_id", "run_id", "head_sha", "round", "files_changed",
-            "tests", "notes", "lane_id", "status", "backend",
-            "duration_ms", "input_tokens", "output_tokens", "total_tokens",
-            "cost_cents", "lane_metrics", "merge_provenance",
-        })
+        known_keys: frozenset[str] = frozenset(
+            {
+                "task_id",
+                "run_id",
+                "head_sha",
+                "round",
+                "files_changed",
+                "tests",
+                "notes",
+                "lane_id",
+                "status",
+                "backend",
+                "duration_ms",
+                "input_tokens",
+                "output_tokens",
+                "total_tokens",
+                "cost_cents",
+                "lane_metrics",
+                "merge_provenance",
+            }
+        )
     elif schema == "review_report":
         required_types = {
             "task_id": str,
@@ -8629,10 +8656,16 @@ def _validate_report(
             "decision": str,
         }
         prefix = "review_report"
-        known_keys = frozenset({
-            "task_id", "run_id", "decision", "round",
-            "blocking_issues", "non_blocking_suggestions",
-        })
+        known_keys = frozenset(
+            {
+                "task_id",
+                "run_id",
+                "decision",
+                "round",
+                "blocking_issues",
+                "non_blocking_suggestions",
+            }
+        )
     else:
         raise ValueError(f"Unknown schema: {schema}")
 
@@ -8713,25 +8746,15 @@ def _validate_report(
                             continue
                         lane_int_value = lane_metric[lane_int_field]
                         if type(lane_int_value) is not int or lane_int_value < 0:
-                            return (
-                                f"{prefix} lane_metrics[{index}] field '{lane_int_field}' "
-                                f"must be non-negative int"
-                            )
+                            return f"{prefix} lane_metrics[{index}] field '{lane_int_field}' must be non-negative int"
                     for lane_int_field in ("review_duration_ms", "review_blocking_issues"):
                         if lane_int_field not in lane_metric:
                             continue
                         lane_int_value = lane_metric[lane_int_field]
                         if type(lane_int_value) is not int or lane_int_value < 0:
-                            return (
-                                f"{prefix} lane_metrics[{index}] field '{lane_int_field}' "
-                                f"must be non-negative int"
-                            )
+                            return f"{prefix} lane_metrics[{index}] field '{lane_int_field}' must be non-negative int"
     elif schema == "review_report" and report["decision"] not in _VALID_REVIEW_DECISIONS:
-        return (
-            f"{prefix} field 'decision' must be one of "
-            f"{sorted(_VALID_REVIEW_DECISIONS)}, "
-            f"got {report['decision']!r}"
-        )
+        return f"{prefix} field 'decision' must be one of {sorted(_VALID_REVIEW_DECISIONS)}, got {report['decision']!r}"
 
     if report["task_id"] != expected_task_id:
         return f"{prefix} field 'task_id' mismatch: expected {expected_task_id!r}, got {report['task_id']!r}"
@@ -9142,7 +9165,14 @@ def cmd_init(paths: LoopPaths | None = None) -> None:
 
 
 # ── status ──────────────────────────────────────────────────────────
-def cmd_status(*, tree: bool = False, dependency_map: bool = False, paths: LoopPaths | None = None, json_output: bool = False, outcome_only: bool = False) -> None:
+def cmd_status(
+    *,
+    tree: bool = False,
+    dependency_map: bool = False,
+    paths: LoopPaths | None = None,
+    json_output: bool = False,
+    outcome_only: bool = False,
+) -> None:
     resolved_paths = _resolve_paths(paths)
     state = _load_state(paths=resolved_paths)
 
@@ -10661,9 +10691,7 @@ def _knowledge_write_lock(paths: LoopPaths | None = None):
             break
         except RuntimeError as e:
             if time.monotonic() >= deadline:
-                raise RuntimeError(
-                    f"knowledge context lock is unavailable ({lock_path})"
-                ) from e
+                raise RuntimeError(f"knowledge context lock is unavailable ({lock_path})") from e
             time.sleep(max(0.01, _KNOWLEDGE_WRITE_LOCK_RETRY_SEC))
     try:
         yield
@@ -10671,7 +10699,9 @@ def _knowledge_write_lock(paths: LoopPaths | None = None):
         lock.release()
 
 
-def _update_knowledge_on_approval(task_id: str, round_num: int, *, run_id: str | None = None, paths: LoopPaths | None = None) -> None:
+def _update_knowledge_on_approval(
+    task_id: str, round_num: int, *, run_id: str | None = None, paths: LoopPaths | None = None
+) -> None:
     resolved_paths = _resolve_paths(paths)
     sources: list[ReviewReport] = []
     effective_run_id = _normalize_run_id(run_id)
@@ -11002,10 +11032,7 @@ def _run_single_round(
                 )
                 return
             if resolved_base_sha != base_sha:
-                _log(
-                    "Resolved base ref to commit OID for deterministic compare: "
-                    f"{base_sha} -> {resolved_base_sha}"
-                )
+                _log(f"Resolved base ref to commit OID for deterministic compare: {base_sha} -> {resolved_base_sha}")
                 base_sha = resolved_base_sha
         lane_by_id = {str(lane["lane_id"]): lane for lane in task_lanes}
         lane_handle_by_id = {handle.lane_id: handle for handle in lane_worktrees}
@@ -11512,10 +11539,7 @@ def _run_single_round(
             if lane_review_failures:
                 _fail_single_round(
                     outcome="lane_review_rejected",
-                    message=(
-                        "Lane review gate rejected integration: "
-                        + "; ".join(lane_review_failures)
-                    ),
+                    message=("Lane review gate rejected integration: " + "; ".join(lane_review_failures)),
                     exit_code=EXIT_VALIDATION_ERROR,
                 )
                 return
@@ -11703,10 +11727,7 @@ def _run_single_round(
             )
             return
         if resolved_base_sha != base_sha:
-            _log(
-                "Resolved base ref to commit OID for deterministic compare: "
-                f"{base_sha} -> {resolved_base_sha}"
-            )
+            _log(f"Resolved base ref to commit OID for deterministic compare: {base_sha} -> {resolved_base_sha}")
             base_sha = resolved_base_sha
         try:
             head_sha = _resolve_commit_oid(head_ref)
@@ -11724,8 +11745,15 @@ def _run_single_round(
         if _noop_handler is not None:
             try:
                 _noop_handler(
-                    state, work, task_id, round_num, run_id,
-                    base_sha, head_sha, config, paths=resolved_paths,
+                    state,
+                    work,
+                    task_id,
+                    round_num,
+                    run_id,
+                    base_sha,
+                    head_sha,
+                    config,
+                    paths=resolved_paths,
                     cleanup_fn=_cleanup_lane_worktrees,
                     archive_fn=_archive_single_round_state,
                 )
@@ -11907,8 +11935,16 @@ def _run_single_round(
     _phase_handler = _dispatch_single_round_phase("reviewer", decision)
     if _phase_handler is not None:
         _phase_handler(
-            state, work, review, task_id, round_num, run_id,
-            base_sha, head_sha, config, paths=resolved_paths,
+            state,
+            work,
+            review,
+            task_id,
+            round_num,
+            run_id,
+            base_sha,
+            head_sha,
+            config,
+            paths=resolved_paths,
             cleanup_fn=_cleanup_lane_worktrees,
             archive_fn=_archive_single_round_state,
         )
@@ -11916,8 +11952,16 @@ def _run_single_round(
             return
         return
     _single_round_handle_changes_required(
-        state, work, review, task_id, round_num, run_id,
-        base_sha, head_sha, config, paths=resolved_paths,
+        state,
+        work,
+        review,
+        task_id,
+        round_num,
+        run_id,
+        base_sha,
+        head_sha,
+        config,
+        paths=resolved_paths,
         cleanup_fn=_cleanup_lane_worktrees,
         archive_fn=_archive_single_round_state,
     )
@@ -12193,16 +12237,20 @@ def _run_multi_round_via_subprocess(
                 return
 
             outcome = state.get("outcome")
-            _post_round_handler = _dispatch_post_round(
-                state, round_num, normalized_state_name
-            )
+            _post_round_handler = _dispatch_post_round(state, round_num, normalized_state_name)
             if _post_round_handler is _post_round_handle_terminal_success:
                 _post_round_handler(state, round_num, task_id, config, paths=resolved_paths)
                 return
             if _post_round_handler is _post_round_handle_awaiting_next_round:
                 _should_continue = _post_round_handler(
-                    state, round_num, task_id, config, paths=resolved_paths,
-                    fix_list=fix_list, review=review, run_id=run_id,
+                    state,
+                    round_num,
+                    task_id,
+                    config,
+                    paths=resolved_paths,
+                    fix_list=fix_list,
+                    review=review,
+                    run_id=run_id,
                 )
                 if _should_continue:
                     continue
@@ -12369,6 +12417,7 @@ def cmd_run(
 
 # ── table-driven dispatch handler functions ────────────────────────
 
+
 def _post_round_handle_terminal_success(
     state: dict,
     round_num: int,
@@ -12461,8 +12510,7 @@ def _terminal_outcome_handle_resume_failure(
     _write_task_card_status(config.task_path, TASK_STATUS_BLOCKED, paths=resolved_paths)
     error_text = state.get("error") or "<no error details in state.json>"
     print(
-        "Error: cannot resume because state.json indicates a failed run: "
-        f"outcome={outcome!r} error={error_text}",
+        f"Error: cannot resume because state.json indicates a failed run: outcome={outcome!r} error={error_text}",
         file=sys.stderr,
     )
     print("Re-run without --resume to start a fresh run.", file=sys.stderr)
@@ -12708,6 +12756,7 @@ def _single_round_handle_changes_required(
 
 # ── dispatch table population ─────────────────────────────────────
 
+
 def _dispatch_post_round(
     state: dict,
     round_num: int,
@@ -12760,29 +12809,37 @@ def _is_terminal_resume_failure(state: dict, round_num: int) -> bool:
     return normalized == STATE_DONE and state.get("outcome") not in _TERMINAL_SUCCESS_OUTCOMES
 
 
-_STATE_HANDLERS.update({
-    STATE_IDLE: _run_multi_round_via_subprocess,
-    STATE_AWAITING_WORK: _run_single_round,
-    STATE_AWAITING_REVIEW: _run_single_round,
-    STATE_DONE: _run_multi_round_via_subprocess,
-})
+_STATE_HANDLERS.update(
+    {
+        STATE_IDLE: _run_multi_round_via_subprocess,
+        STATE_AWAITING_WORK: _run_single_round,
+        STATE_AWAITING_REVIEW: _run_single_round,
+        STATE_DONE: _run_multi_round_via_subprocess,
+    }
+)
 
-_POST_ROUND_DISPATCH.update({
-    (STATE_DONE, _is_post_round_terminal_success): _post_round_handle_terminal_success,
-    (STATE_AWAITING_WORK, _is_post_round_awaiting_next): _post_round_handle_awaiting_next_round,
-})
+_POST_ROUND_DISPATCH.update(
+    {
+        (STATE_DONE, _is_post_round_terminal_success): _post_round_handle_terminal_success,
+        (STATE_AWAITING_WORK, _is_post_round_awaiting_next): _post_round_handle_awaiting_next_round,
+    }
+)
 
-_TERMINAL_OUTCOME_HANDLERS.update({
-    "approved": _terminal_outcome_handle_resume_success,
-    "no_change_success": _terminal_outcome_handle_resume_success,
-    "terminal_error": _terminal_outcome_handle_error,
-})
+_TERMINAL_OUTCOME_HANDLERS.update(
+    {
+        "approved": _terminal_outcome_handle_resume_success,
+        "no_change_success": _terminal_outcome_handle_resume_success,
+        "terminal_error": _terminal_outcome_handle_error,
+    }
+)
 
-_SINGLE_ROUND_PHASE_HANDLERS.update({
-    ("reviewer", "approve"): _single_round_handle_review_approved,
-    ("reviewer", "changes_required"): _single_round_handle_changes_required,
-    ("worker", "no_change_success"): _single_round_handle_worker_noop,
-})
+_SINGLE_ROUND_PHASE_HANDLERS.update(
+    {
+        ("reviewer", "approve"): _single_round_handle_review_approved,
+        ("reviewer", "changes_required"): _single_round_handle_changes_required,
+        ("worker", "no_change_success"): _single_round_handle_worker_noop,
+    }
+)
 
 
 # ── CLI ─────────────────────────────────────────────────────────────
@@ -13035,7 +13092,9 @@ def main() -> None:
     run_p.add_argument("--single-round", action="store_true", help="Run exactly one round and exit")
     run_p.add_argument("--round", type=int, help="Round number for --single-round mode")
     run_p.add_argument("--allow-dirty", action="store_true", help="Allow run to start with dirty tracked git files")
-    run_p.add_argument("--clean-stale", action="store_true", help="Force-clean stale state.json and bus files from crashed runs")
+    run_p.add_argument(
+        "--clean-stale", action="store_true", help="Force-clean stale state.json and bus files from crashed runs"
+    )
     run_p.add_argument(
         "--cwd",
         default=None,
@@ -13061,7 +13120,13 @@ def main() -> None:
         elif args.cmd == "index":
             cmd_index(paths=resolved_paths)
         elif args.cmd == "status":
-            cmd_status(tree=bool(args.tree), dependency_map=bool(args.dependency_map), paths=resolved_paths, json_output=bool(args.json), outcome_only=bool(args.outcome_only))
+            cmd_status(
+                tree=bool(args.tree),
+                dependency_map=bool(args.dependency_map),
+                paths=resolved_paths,
+                json_output=bool(args.json),
+                outcome_only=bool(args.outcome_only),
+            )
         elif args.cmd == "config":
             cmd_config()
         elif args.cmd == "session":
@@ -13134,9 +13199,7 @@ def main() -> None:
             auto_dispatch_cli = True if args.auto_dispatch else None
             worker_noop_as_error_cli: bool | None = None
             if args.worker_noop_as_error and args.worker_noop_as_success:
-                raise ValidationError(
-                    "--worker-noop-as-error and --worker-noop-as-success are mutually exclusive"
-                )
+                raise ValidationError("--worker-noop-as-error and --worker-noop-as-success are mutually exclusive")
             if args.worker_noop_as_error:
                 worker_noop_as_error_cli = True
             elif args.worker_noop_as_success:
