@@ -351,6 +351,20 @@ DEFAULT_DISPATCH_ARTIFACT_TIMEOUT_SEC = 90
 DEFAULT_DISPATCH_RETRIES = 2
 DEFAULT_DISPATCH_RETRY_BASE_SEC = 5
 _DISPATCH_RETRY_WAIT_SEC = 30
+
+# Output kinds needing long analysis/report windows for artifact (work_report) production.
+# Keep in sync with project_management/src/auto_task/bridge.py _LONG_ARTIFACT_FORMATS/_LONG_ARTIFACT_TIMEOUT_SEC.
+_LONG_ARTIFACT_FORMATS = ("analysis", "report", "summary", "slides", "doc")
+_LONG_ARTIFACT_TIMEOUT_SEC = 600  # 10 min
+
+
+def _artifact_timeout_for_format(output_format: str, base_timeout: int) -> int:
+    """Adapt artifact timeout by task kind. Long formats get a raised floor; else base."""
+    if output_format in _LONG_ARTIFACT_FORMATS:
+        return max(base_timeout, _LONG_ARTIFACT_TIMEOUT_SEC)
+    return base_timeout
+
+
 DEFAULT_MAX_SESSION_ROUNDS = 0
 DEFAULT_MAX_PARALLEL_WORKERS = 2
 DEFAULT_MAX_PARALLEL_WORKERS_CAP = 4
