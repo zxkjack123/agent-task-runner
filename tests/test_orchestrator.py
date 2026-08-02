@@ -17068,3 +17068,16 @@ class TestSummaryBudgetBlock:
         assert orchestrator._task_mode_from_card(None) == "generate"
         assert orchestrator._task_mode_from_card({"mode": "patch"}) == "patch"
         assert orchestrator._task_mode_from_card({"mode": "  revise  "}) == "revise"
+def test_artifact_timeout_for_format_long_formats_raise_floor() -> None:
+    """Long analysis/report formats get a raised artifact-timeout floor."""
+    for fmt in orchestrator._LONG_ARTIFACT_FORMATS:
+        assert orchestrator._artifact_timeout_for_format(fmt, 90) == orchestrator._LONG_ARTIFACT_TIMEOUT_SEC
+    # Base above floor is preserved.
+    assert orchestrator._artifact_timeout_for_format("analysis", 700) == 700
+
+
+def test_artifact_timeout_for_format_code_and_unknown_keep_base() -> None:
+    """code/script/unknown keep the base timeout (no adaptation)."""
+    assert orchestrator._artifact_timeout_for_format("code", 300) == 300
+    assert orchestrator._artifact_timeout_for_format("script", 120) == 120
+    assert orchestrator._artifact_timeout_for_format("unrecognized", 90) == 90
