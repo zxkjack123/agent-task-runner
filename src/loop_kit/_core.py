@@ -230,6 +230,7 @@ class TaskCard(TypedDict, total=False):
     out_of_scope: Required[list[str]]
     acceptance_criteria: Required[list[str]]
     constraints: Required[list[str]]
+    context_files: NotRequired[list[str]]
     depends_on: NotRequired[list[str]]
     dependencies: NotRequired[list[str]]
     lanes: NotRequired[list[TaskLane]]
@@ -335,6 +336,12 @@ class DirtyWorktreeError(ValidationError):
 
 ROOT = Path.cwd()
 _LOOP_DIR = ROOT / ".loop"
+
+# Absolute-path whitelist roots for task_card `context_files`. Empty tuple = deny
+# all absolute paths (allow repo-relative paths only) — the safest default. Extend
+# with absolute repo roots to permit cross-repo context references; coordination
+# with _is_safe_scope_pattern is required if such roots are introduced (M15).
+_CONTEXT_FILES_ALLOWED_ROOTS: tuple[str, ...] = ()
 
 DEFAULT_MAX_ROUNDS = 3
 POLL_INTERVAL_SEC = 1
