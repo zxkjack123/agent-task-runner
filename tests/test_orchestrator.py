@@ -13352,3 +13352,46 @@ def test_adapt_artifact_timeout_keeps_code_and_missing_format() -> None:
     cfg2 = orchestrator.RunConfig(artifact_timeout=120)
     orchestrator._adapt_artifact_timeout_to_output_format(cfg2, {})
     assert cfg2.artifact_timeout == 120
+
+
+def test_worker_prompt_includes_context_files_after_render(tmp_path: Path, monkeypatch) -> None:
+    """_worker_prompt appends context_files content AFTER str.format() (braces-safe) (PM #2234 T1.3)."""
+    _configure_loop_paths(monkeypatch, tmp_path)
+    # A file whose content contains { and } — the str.format() crash regression test.
+    ctx = tmp_path / "ctx.md"
+    ctx.write_text("line with {braces} and } too\nCONTEXT_FILE_MARKER", encoding="utf-8")
+    (tmp_path / ".loop" / "task_card.json").write_text(
+        '{"goal":"g","context_files":["ctx.md"]}', encoding="utf-8"
+    )
+    prompt = orchestrator._worker_prompt("T-1", 1, run_id="R", paths=orchestrator._stored_paths)
+    assert "CONTEXT_FILE_MARKER" in prompt  # content injected
+    assert "=== CONTEXT FILES ===" in prompt
+    assert "context_file: ctx.md" in prompt
+    # Braces content must survive (no ValueError from str.format).
+    assert "{braces" in prompt
+
+
+def test_worker_prompt_context_files_empty_no_change(tmp_path: Path, monkeypatch) -> None:
+    """Empty context_files must not alter the worker prompt output (regression) (PM #2234 T1.3)."""
+    _configure_loop_paths(monkeypatch, tmp_path)
+    (tmp_path / ".loop" / "task_card.json").write_text('{"goal":"g"}', encoding="utf-8")
+    prompt = orchestrator._worker_prompt("T-1", 1, run_id="R", paths=orchestrator._stored_paths)
+    assert "=== CONTEXT FILES ===" not in prompt
+
+
+def test_render_task_card_section_includes_context_files_ref(tmp_path: Path, monkeypatch) -> None:
+    """_render_task_card_section lists resolved context_files paths (PM #2234 T1.4)."""
+    _configure_loop_paths(monkeypatch, tmp_path)
+    ctx = tmp_path / "ctx.md"
+    ctx.write_text("x", encoding="utf-8")
+    card = {
+        "goal": "g",
+        "in_scope": [],
+        "out_of_scope": [],
+        "acceptance_criteria": [],
+        "constraints": [],
+        "context_files": ["ctx.md"],
+    }
+    section = orchestrator._render_task_card_section(card)
+    assert "context_files:" in section
+    assert "ctx.md" in section

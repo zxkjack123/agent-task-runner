@@ -5614,7 +5614,35 @@ def _render_task_card_section(task_card: TaskCard) -> str:
         f"{_as_prompt_list(lanes_lines)}\n"
         "constraints:\n"
         f"{_as_prompt_list(task_card.get('constraints'))}\n"
+        "context_files:\n"
+        f"{_as_prompt_list([_display_path(p) for p in _resolve_context_files_safe(task_card.get('context_files', []), ROOT)])}\n"
     )
+
+
+def _render_context_files_section(task_card: TaskCard) -> str:
+    """Render the resolved `context_files` contents as a post-appended prompt section.
+
+    MUST NOT be placed into the template context dict: file contents may contain
+    '{'/'}' which would break str.format() in _render_prompt_template. Instead callers
+    append this section to the fully-rendered prompt string AFTER .format() runs.
+    """
+    cf = task_card.get("context_files", [])
+    if not isinstance(cf, list) or not cf:
+        return ""
+    paths = _resolve_context_files_safe(cf, ROOT)
+    if not paths:
+        return ""
+    blocks: list[str] = []
+    for p in paths:
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            _log(f"context_files: cannot read {p}")
+            continue
+        if len(text) > 20000:
+            text = text[:20000] + "\n...[truncated]..."
+        blocks.append(f"--- context_file: {_display_path(p)} ---\n{text}\n--- end context_file ---")
+    return "\n\n=== CONTEXT FILES ===" + "\n\n".join(blocks)
 
 
 def _render_quickstart_context_section(task_card: TaskCard) -> str:
@@ -6136,6 +6164,8 @@ def _worker_prompt(
             "prior_context_section": prior_context_section or "",
         }
         rendered = _render_prompt_template(template_path=template_path, context=context)
+        # context_files content must be appended AFTER str.format() (it may contain {/}).
+        rendered = rendered + _render_context_files_section(task_card)
         if f"run_id: {effective_run_id}" in rendered:
             return rendered
         return rendered.rstrip() + f"\n\n=== RUN CONTEXT ===\nrun_id: {effective_run_id}\n"
@@ -6147,6 +6177,9 @@ def _worker_prompt(
     )
     sections = _build_prompt_sections(task_id, round_num, paths=resolved_paths)
     result = header + "\n\n" + _join_prompt_sections(sections)
+    _task_card_data = _read_json_if_exists(resolved_paths.task_card)
+    _task_card = cast(TaskCard, _task_card_data) if isinstance(_task_card_data, dict) else cast(TaskCard, {})
+    result = result + _render_context_files_section(_task_card)
     if round_num > 1 and not _render_prior_round_context_section(round_num, paths=resolved_paths):
         result += "\n\n"
     return result
