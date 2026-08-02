@@ -2117,7 +2117,9 @@ def test_auto_dispatch_role_emits_serial_lane_runtime_cost_fields(monkeypatch) -
     assert phase_payload["cost_cents"] == 1
 
 
-def test_enrich_work_report_runtime_fields_sets_zero_cost_for_non_billed_backend() -> None:
+def test_enrich_work_report_runtime_fields_computes_cost_for_billed_opencode_backend() -> None:
+    # opencode is billed at (43, 87) cents/1M tokens since snapshot 6783413.
+    # 5000*43 + 4000*87 = 563000 -> ceil(0.563) = 1 cent.
     report: orchestrator.WorkReport = {
         "task_id": "T-715",
         "round": 1,
@@ -2134,7 +2136,7 @@ def test_enrich_work_report_runtime_fields_sets_zero_cost_for_non_billed_backend
     assert report["backend"] == orchestrator.BACKEND_OPENCODE
     assert report["duration_ms"] == 88
     assert report["total_tokens"] == 9000
-    assert report["cost_cents"] == 0
+    assert report["cost_cents"] == 1
 
 
 def test_auto_dispatch_role_dispatch_event_ordering_includes_artifact_boundary(monkeypatch) -> None:
@@ -5933,7 +5935,8 @@ def test_single_round_lane_dispatch_emits_lane_runtime_telemetry_and_report_fiel
 
     lane_report = json.loads((orchestrator.LOOP_DIR / "work_reports" / "lane_core.json").read_text(encoding="utf-8"))
     assert lane_report["lane_id"] == "lane_core"
-    assert lane_report["backend"] == orchestrator.BACKEND_CODEX
+    # DEFAULT_WORKER_BACKEND is opencode since snapshot 6783413 (was codex).
+    assert lane_report["backend"] == orchestrator.BACKEND_OPENCODE
     assert lane_report["duration_ms"] == 750
     assert lane_report["total_tokens"] == 3000
     assert lane_report["cost_cents"] == 1
@@ -8498,6 +8501,11 @@ class TestCmdStatus:
 
     def test_shows_context_file_stats(self, tmp_path: Path, monkeypatch, capsys) -> None:
         _configure_loop_paths(monkeypatch, tmp_path)
+        # Relative timestamps keep the staleness assertion valid regardless of when the
+        # test runs (fresh = within PATTERN_STALE_DAYS, stale = well beyond).
+        _now_utc = datetime.now(UTC)
+        _fresh_iso = (_now_utc - timedelta(days=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        _stale_iso = (_now_utc - timedelta(days=100)).strftime("%Y-%m-%dT%H:%M:%SZ")
         context_dir = tmp_path / ".loop" / "context"
         context_dir.mkdir(parents=True, exist_ok=True)
         (context_dir / "project_facts.md").write_text(
@@ -8511,7 +8519,7 @@ class TestCmdStatus:
                     "pattern": "fresh pattern",
                     "category": "workflow",
                     "confidence": 0.9,
-                    "last_verified": "2026-04-01T12:00:00Z",
+                    "last_verified": _fresh_iso,
                 },
                 ensure_ascii=False,
             )
@@ -8521,7 +8529,7 @@ class TestCmdStatus:
                     "pattern": "stale pattern",
                     "category": "workflow",
                     "confidence": 0.9,
-                    "last_verified": "2025-01-01T00:00:00Z",
+                    "last_verified": _stale_iso,
                 },
                 ensure_ascii=False,
             )
