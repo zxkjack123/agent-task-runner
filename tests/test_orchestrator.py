@@ -13316,3 +13316,22 @@ def test_artifact_timeout_for_format_code_and_unknown_keep_base() -> None:
     assert orchestrator._artifact_timeout_for_format("code", 300) == 300
     assert orchestrator._artifact_timeout_for_format("script", 120) == 120
     assert orchestrator._artifact_timeout_for_format("unrecognized", 90) == 90
+
+
+def test_resolve_context_files_safe_relative_and_escape(tmp_path) -> None:
+    """Relative context_files resolve under root; '..' escape is skipped."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "good.md").write_text("x")
+    got = orchestrator._resolve_context_files_safe(["good.md"], repo)
+    assert [p.name for p in got] == ["good.md"]
+    assert orchestrator._resolve_context_files_safe(["../outside.md"], repo) == []
+
+
+def test_resolve_context_files_safe_missing_and_absolute(tmp_path) -> None:
+    """Missing files and absolute paths (empty whitelist) are skipped."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "good.md").write_text("x")
+    assert orchestrator._resolve_context_files_safe(["nope.md"], repo) == []
+    assert orchestrator._resolve_context_files_safe([str(repo / "good.md")], repo) == []

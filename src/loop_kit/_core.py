@@ -5405,6 +5405,43 @@ def _is_path_under_root(path: Path, root: Path) -> bool:
         return False
 
 
+def _resolve_context_files_safe(context_files: list[str], root: Path) -> list[Path]:
+    """Resolve a task's `context_files` list into existing file paths usable by a Worker.
+
+    Rules:
+    - Relative paths are resolved against `root` and MUST remain under `root`
+      after resolution (rejects '..' escape / symlink escape).
+    - Absolute paths are allowed ONLY under _CONTEXT_FILES_ALLOWED_ROOTS
+      (empty tuple = deny all absolute paths).
+    - Non-existent / non-file / unsafe entries are silently skipped (best-effort).
+    - Unsafe entries never raise; they are logged and skipped.
+    """
+    root_resolved = root.resolve()
+    out: list[Path] = []
+    for raw in context_files:
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        p = Path(raw.strip())
+        try:
+            if p.is_absolute():
+                resolved = p.resolve()
+                allowed = any(resolved.is_relative_to(Path(r).resolve()) for r in _CONTEXT_FILES_ALLOWED_ROOTS)
+                if not allowed:
+                    _log(f"Ignoring unsafe context_files absolute path: {raw!r}")
+                    continue
+            else:
+                resolved = (root_resolved / p).resolve()
+                if not _is_path_under_root(resolved, root_resolved):
+                    _log(f"Ignoring context_files escaping root: {raw!r}")
+                    continue
+            if resolved.is_file():
+                out.append(resolved)
+        except (OSError, RuntimeError, ValueError):
+            _log(f"Ignoring invalid context_files entry: {raw!r}")
+            continue
+    return out
+
+
 def _build_task_packet(task_card: TaskCard, round_num: int, paths: LoopPaths | None = None) -> TaskPacket:
     in_scope = task_card.get("in_scope", [])
     target_files: list[str] = []
