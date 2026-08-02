@@ -13335,3 +13335,20 @@ def test_resolve_context_files_safe_missing_and_absolute(tmp_path) -> None:
     (repo / "good.md").write_text("x")
     assert orchestrator._resolve_context_files_safe(["nope.md"], repo) == []
     assert orchestrator._resolve_context_files_safe([str(repo / "good.md")], repo) == []
+
+
+def test_adapt_artifact_timeout_to_output_format_raises_for_analysis() -> None:
+    """analysis output_format raises config.artifact_timeout to the long floor."""
+    cfg = orchestrator.RunConfig(artifact_timeout=90)
+    orchestrator._adapt_artifact_timeout_to_output_format(cfg, {"output_format": "analysis"})
+    assert cfg.artifact_timeout == 600
+
+
+def test_adapt_artifact_timeout_keeps_code_and_missing_format() -> None:
+    """code / missing output_format keep the base timeout unchanged."""
+    cfg = orchestrator.RunConfig(artifact_timeout=300)
+    orchestrator._adapt_artifact_timeout_to_output_format(cfg, {"output_format": "code"})
+    assert cfg.artifact_timeout == 300
+    cfg2 = orchestrator.RunConfig(artifact_timeout=120)
+    orchestrator._adapt_artifact_timeout_to_output_format(cfg2, {})
+    assert cfg2.artifact_timeout == 120

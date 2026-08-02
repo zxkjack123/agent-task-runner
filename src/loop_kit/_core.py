@@ -628,6 +628,19 @@ class RunConfig:
     verbose: bool = False
 
 
+def _adapt_artifact_timeout_to_output_format(config: RunConfig, task_card: TaskCard) -> None:
+    """Raise config.artifact_timeout when the task's output_format needs a long window.
+
+    `RunConfig` is a mutable dataclass (`slots=True`), so adapting in place after the
+    task_card is synchronized is safe. Falls back to no-op when output_format is missing.
+    """
+    fmt = str(task_card.get("output_format", "code"))
+    new_to = _artifact_timeout_for_format(fmt, config.artifact_timeout)
+    if new_to != config.artifact_timeout:
+        config.artifact_timeout = new_to
+        _log(f"artifact_timeout adapted: {new_to}s (output_format={fmt})")
+
+
 @dataclass(frozen=True, slots=True)
 class FeedEvent:
     ts: str
@@ -10883,6 +10896,7 @@ def _run_single_round(
     task_packet_path = resolved_paths.dir / "task_packet.json"
     _ = single_round
     task_card, task_id_from_card = _sync_task_card_to_bus(config.task_path, round_num=round_num, paths=resolved_paths)
+    _adapt_artifact_timeout_to_output_format(config, task_card)
 
     state = _load_state(paths=resolved_paths)
     run_id = _ensure_state_run_id(state)
@@ -12060,6 +12074,7 @@ def _run_multi_round_via_subprocess(
     run_id = ""
     if resume_from_state is None:
         task_card, task_id = _sync_task_card_to_bus(config.task_path, round_num=1, paths=resolved_paths)
+        _adapt_artifact_timeout_to_output_format(config, task_card)
         preflight_state = _load_state(paths=resolved_paths)
         if not isinstance(preflight_state.get("task_id"), str) or not cast(str, preflight_state.get("task_id")).strip():
             preflight_state["task_id"] = task_id
