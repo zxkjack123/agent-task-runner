@@ -5599,6 +5599,8 @@ def _render_task_card_section(task_card: TaskCard) -> str:
         for lane in lanes_raw:
             if isinstance(lane, dict):
                 lanes_lines.append(json.dumps(lane, ensure_ascii=False))
+    ctx_files = _resolve_context_files_safe(task_card.get("context_files", []), ROOT)
+    ctx_file_lines = _as_prompt_list([_display_path(p) for p in ctx_files])
     return (
         "=== TASK CARD ===\n"
         f"goal: {task_card.get('goal', '<none>')}\n"
@@ -5615,7 +5617,7 @@ def _render_task_card_section(task_card: TaskCard) -> str:
         "constraints:\n"
         f"{_as_prompt_list(task_card.get('constraints'))}\n"
         "context_files:\n"
-        f"{_as_prompt_list([_display_path(p) for p in _resolve_context_files_safe(task_card.get('context_files', []), ROOT)])}\n"
+        f"{ctx_file_lines}\n"
     )
 
 
