@@ -3,9 +3,9 @@ import sys
 
 
 def main() -> None:
-    if len(sys.argv) > 1:
+    try:
         name = sys.argv[1]
-    else:
+    except IndexError:
         name = "World"
     print(f"Hello, {name}!")
 
