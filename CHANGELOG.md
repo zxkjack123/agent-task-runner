@@ -102,3 +102,17 @@
 - PM bridge: 18 full-chain tests
 - AOM Go: 18 tests
 - **Total: 627 passing across 3 repos**
+
+## v0.7.0 (2026-08-14)
+
+### ATR Worker Robustness (PM #2653 / #2654)
+- **`--auto` permission flag**: opencode worker dispatch (`_build_opencode_command`) now appends `--auto` (auto-approve non-explicitly-denied permissions). Headless workers no longer stall on interactive permission prompts (T-2623). User-side 17 explicit deny rules still honored.
+- **Partial work_report synthesis**: when a worker exits (rc=0) without writing work_report.json, `_dispatch_with_artifact_fallback` with `synthesize_on_missing=True` synthesizes a minimal `status="partial"` report (head_sha / files_changed / notes), preserving committed-but-unreported work into the reviewer round instead of discarding the whole run.
+- **Partial-status enrichment guard**: `_enrich_work_report_runtime_fields` no longer overwrites an existing `status="partial"` (previously forced to "completed").
+- New tests: `--auto` in cmd for new-session + resume branches; synthesize-partial report; enrich preserves partial status.
+
+### Stability
+- `_dispatch_with_artifact_fallback` gained optional `synthesize_on_missing` / `synthesize_cwd` kwargs; lane workers synthesize from their worktree handle; lane reviewers do not synthesize.
+
+### Tests
+- `pytest -m "not e2e"` → 599 passed / 1 pre-existing failed / 1 skipped / 3 deselected (deterministic repeat: 600 passed / 1 pre-existing failed / 1 skipped).

@@ -2507,6 +2507,7 @@ def _build_opencode_command(
         "run",
         "--format",
         "json",
+        "--auto",
     ]
     if sid:
         cmd.extend(["-s", sid])
@@ -3419,6 +3420,57 @@ def _run_auto_dispatch(
             _stop_auto_dispatch_heartbeat(role)
 
 
+def _synthesize_partial_work_report(
+    *,
+    role: str,
+    artifact_path: Path,
+    task_id: str,
+    round_num: int,
+    run_id: str | None = None,
+    cwd: Path | None = None,
+    paths: LoopPaths | None = None,
+) -> dict:
+    git_cwd = Path(cwd) if cwd is not None else ROOT
+    try:
+        head_sha = _git_at(git_cwd, "rev-parse", "HEAD").strip()
+    except Exception:
+        head_sha = "unknown"
+    try:
+        diff_output = _git_at(git_cwd, "diff", "--name-only")
+        files_changed = [line.strip() for line in diff_output.splitlines() if line.strip()]
+    except Exception:
+        files_changed = []
+    notes = "partial report synthesized; no tool activity captured"
+    log_path = _dispatch_log_path(role, paths)
+    tail_text = ""
+    if log_path.exists():
+        try:
+            tail_text = log_path.read_text(encoding="utf-8", errors="replace")[-8000:]
+        except OSError:
+            tail_text = ""
+    if tail_text:
+        tool_lines = [line.strip() for line in tail_text.splitlines() if "tool_use" in line]
+        if tool_lines:
+            summaries = [line[:240] for line in tool_lines[-5:]]
+            notes = (
+                "partial report synthesized: dispatch succeeded but work_report.json missing. "
+                "Last tool activity:\n" + "\n".join(summaries)
+            )
+    data: dict[str, object] = {
+        "task_id": task_id,
+        "round": round_num,
+        "head_sha": head_sha,
+        "files_changed": files_changed,
+        "status": "partial",
+        "notes": notes,
+    }
+    if run_id is not None:
+        data["run_id"] = run_id
+    artifact_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    _log(f"{role} synthesized partial {artifact_path.name} (dispatch succeeded but report missing)")
+    return data
+
+
 def _require_dispatch_artifact(
     role: str,
     path: Path,
@@ -3453,6 +3505,8 @@ def _dispatch_with_artifact_fallback(
     round_num: int,
     timeout_sec: int = DEFAULT_DISPATCH_ARTIFACT_TIMEOUT_SEC,
     run_id: str | None = None,
+    synthesize_on_missing: bool = False,
+    synthesize_cwd: Path | None = None,
 ) -> dict:
     expected_run_id = run_id if run_id is not None else _current_feed_run_id()
     try:
@@ -3493,14 +3547,31 @@ def _dispatch_with_artifact_fallback(
                 _log(f"{role} ignoring direct artifact with mismatched identity: {e}")
             else:
                 _log(f"{role} dispatch produced {artifact_path.name} directly; validating via wait contract")
-    return _require_dispatch_artifact(
-        role=role,
-        path=artifact_path,
-        task_id=task_id,
-        round_num=round_num,
-        timeout_sec=timeout_sec,
-        run_id=expected_run_id,
-    )
+    try:
+        return _require_dispatch_artifact(
+            role=role,
+            path=artifact_path,
+            task_id=task_id,
+            round_num=round_num,
+            timeout_sec=timeout_sec,
+            run_id=expected_run_id,
+        )
+    except RuntimeError:
+        if not synthesize_on_missing:
+            raise
+        _log(
+            f"{role} dispatch succeeded but {artifact_path.name} is missing; "
+            "synthesizing partial work report to preserve finished work"
+        )
+        return _synthesize_partial_work_report(
+            role=role,
+            artifact_path=artifact_path,
+            task_id=task_id,
+            round_num=round_num,
+            run_id=expected_run_id,
+            cwd=synthesize_cwd,
+            paths=None,
+        )
 
 
 def _read_text_optional(path: Path) -> str | None:
@@ -4585,7 +4656,7 @@ def _enrich_work_report_runtime_fields(
     report["duration_ms"] = normalized_duration if normalized_duration is not None else max(0, int(duration_ms))
     if lane_id is not None:
         report["lane_id"] = lane_id
-    if status is not None:
+    if status is not None and report.get("status") != "partial":
         report["status"] = status
     for field_name, field_value in _runtime_cost_and_token_fields(report, backend=normalized_backend).items():
         report[field_name] = field_value
@@ -10503,6 +10574,8 @@ def _auto_dispatch_role(
             "task_id": task_id,
             "round_num": round_num,
             "timeout_sec": config.artifact_timeout,
+            "synthesize_on_missing": role == "worker",
+            "synthesize_cwd": None,
         }
         if run_id is not None:
             dispatch_artifact_kwargs["run_id"] = run_id
@@ -11067,6 +11140,8 @@ def _run_single_round(
                 round_num=round_num,
                 timeout_sec=config.artifact_timeout,
                 run_id=run_id,
+                synthesize_on_missing=True,
+                synthesize_cwd=handle.path,
             )
             lane_work = cast(WorkReport, artifact)
             artifact_written_latency_ms = max(0, int((time.monotonic() - dispatch_started_at) * 1000))

@@ -298,6 +298,7 @@ def test_agent_command_opencode_uses_stdin_and_short_cli_instruction(monkeypatch
     assert "run" in cmd
     assert "--format" in cmd
     assert "json" in cmd
+    assert "--auto" in cmd
     assert "-s" not in cmd  # new session: no -s flag
     assert "stdin" in cmd[-1].lower()
     assert long_prompt not in " ".join(cmd)
@@ -323,6 +324,7 @@ def test_agent_command_opencode_uses_resume_session_when_provided(monkeypatch) -
     assert "run" in cmd
     assert "--format" in cmd
     assert "json" in cmd
+    assert "--auto" in cmd
     assert "-s" in cmd
     assert cmd[cmd.index("-s") + 1] == "sid-reuse-789"
     assert session_id == "sid-reuse-789"
@@ -1257,6 +1259,8 @@ def test_auto_dispatch_role_only_enables_heartbeat_when_required(monkeypatch) ->
         task_id: str,
         round_num: int,
         timeout_sec: int = orchestrator.DEFAULT_DISPATCH_ARTIFACT_TIMEOUT_SEC,
+        synthesize_on_missing: bool = False,
+        synthesize_cwd: Path | None = None,
     ) -> dict:
         _ = (role, artifact_path, task_id, round_num, timeout_sec)
         dispatch_call()
@@ -1394,6 +1398,8 @@ def test_auto_dispatch_role_reuses_and_persists_worker_session(tmp_path: Path, m
         task_id: str,
         round_num: int,
         timeout_sec: int = orchestrator.DEFAULT_DISPATCH_ARTIFACT_TIMEOUT_SEC,
+        synthesize_on_missing: bool = False,
+        synthesize_cwd: Path | None = None,
     ) -> dict:
         _ = (role, artifact_path, timeout_sec)
         dispatch_call()
@@ -1447,6 +1453,8 @@ def test_auto_dispatch_role_reuses_and_persists_worker_session_opencode(tmp_path
         task_id: str,
         round_num: int,
         timeout_sec: int = orchestrator.DEFAULT_DISPATCH_ARTIFACT_TIMEOUT_SEC,
+        synthesize_on_missing: bool = False,
+        synthesize_cwd: Path | None = None,
     ) -> dict:
         _ = (role, artifact_path, timeout_sec)
         dispatch_call()
@@ -1504,6 +1512,8 @@ def test_auto_dispatch_role_invalidates_sessions_on_base_sha_mismatch(tmp_path: 
         task_id: str,
         round_num: int,
         timeout_sec: int = orchestrator.DEFAULT_DISPATCH_ARTIFACT_TIMEOUT_SEC,
+        synthesize_on_missing: bool = False,
+        synthesize_cwd: Path | None = None,
     ) -> dict:
         _ = (role, artifact_path, timeout_sec)
         dispatch_call()
@@ -1558,6 +1568,8 @@ def test_auto_dispatch_role_invalidates_sessions_on_task_switch(tmp_path: Path, 
         task_id: str,
         round_num: int,
         timeout_sec: int = orchestrator.DEFAULT_DISPATCH_ARTIFACT_TIMEOUT_SEC,
+        synthesize_on_missing: bool = False,
+        synthesize_cwd: Path | None = None,
     ) -> dict:
         _ = (role, artifact_path, timeout_sec)
         dispatch_call()
@@ -1612,6 +1624,8 @@ def test_auto_dispatch_role_invalidates_reviewer_session_on_round_reset(tmp_path
         task_id: str,
         round_num: int,
         timeout_sec: int = orchestrator.DEFAULT_DISPATCH_ARTIFACT_TIMEOUT_SEC,
+        synthesize_on_missing: bool = False,
+        synthesize_cwd: Path | None = None,
     ) -> dict:
         _ = (role, artifact_path, timeout_sec)
         dispatch_call()
@@ -1664,6 +1678,8 @@ def test_auto_dispatch_role_invalidates_reviewer_session_on_history_rewrite(tmp_
         task_id: str,
         round_num: int,
         timeout_sec: int = orchestrator.DEFAULT_DISPATCH_ARTIFACT_TIMEOUT_SEC,
+        synthesize_on_missing: bool = False,
+        synthesize_cwd: Path | None = None,
     ) -> dict:
         _ = (role, artifact_path, timeout_sec)
         dispatch_call()
@@ -1724,6 +1740,8 @@ def test_auto_dispatch_role_rotates_session_and_emits_artifact_metric(tmp_path: 
         task_id: str,
         round_num: int,
         timeout_sec: int = orchestrator.DEFAULT_DISPATCH_ARTIFACT_TIMEOUT_SEC,
+        synthesize_on_missing: bool = False,
+        synthesize_cwd: Path | None = None,
     ) -> dict:
         _ = (role, artifact_path, timeout_sec)
         dispatch_call()
@@ -1792,6 +1810,8 @@ def test_auto_dispatch_role_keeps_session_before_rotation_boundary(tmp_path: Pat
         task_id: str,
         round_num: int,
         timeout_sec: int = orchestrator.DEFAULT_DISPATCH_ARTIFACT_TIMEOUT_SEC,
+        synthesize_on_missing: bool = False,
+        synthesize_cwd: Path | None = None,
     ) -> dict:
         _ = (role, artifact_path, timeout_sec)
         dispatch_call()
@@ -1855,6 +1875,8 @@ def test_auto_dispatch_role_rotates_missing_started_round_when_rotation_enabled(
         task_id: str,
         round_num: int,
         timeout_sec: int = orchestrator.DEFAULT_DISPATCH_ARTIFACT_TIMEOUT_SEC,
+        synthesize_on_missing: bool = False,
+        synthesize_cwd: Path | None = None,
     ) -> dict:
         _ = (role, artifact_path, timeout_sec)
         dispatch_call()
@@ -1920,6 +1942,8 @@ def test_auto_dispatch_role_emits_dispatch_phase_metrics_with_complete_boundarie
         task_id: str,
         round_num: int,
         timeout_sec: int = orchestrator.DEFAULT_DISPATCH_ARTIFACT_TIMEOUT_SEC,
+        synthesize_on_missing: bool = False,
+        synthesize_cwd: Path | None = None,
     ) -> dict:
         _ = (role, artifact_path, timeout_sec)
         dispatch_call()
@@ -1996,6 +2020,8 @@ def test_auto_dispatch_role_phase_metrics_graceful_when_work_boundary_missing(mo
         task_id: str,
         round_num: int,
         timeout_sec: int = orchestrator.DEFAULT_DISPATCH_ARTIFACT_TIMEOUT_SEC,
+        synthesize_on_missing: bool = False,
+        synthesize_cwd: Path | None = None,
     ) -> dict:
         _ = (role, artifact_path, timeout_sec)
         dispatch_call()
@@ -2065,6 +2091,8 @@ def test_auto_dispatch_role_emits_serial_lane_runtime_cost_fields(monkeypatch) -
         task_id: str,
         round_num: int,
         timeout_sec: int = orchestrator.DEFAULT_DISPATCH_ARTIFACT_TIMEOUT_SEC,
+        synthesize_on_missing: bool = False,
+        synthesize_cwd: Path | None = None,
     ) -> dict:
         _ = (role, artifact_path, timeout_sec)
         dispatch_call()
@@ -2137,6 +2165,96 @@ def test_enrich_work_report_runtime_fields_sets_zero_cost_for_non_billed_backend
     assert report["cost_cents"] == 0
 
 
+# ── PM #2654: partial work_report synthesis (missing-artifact fallback) ──
+
+
+def _init_git_repo_for_synth(repo: Path) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+
+
+def test_dispatch_fallback_synthesizes_partial_report(tmp_path: Path, monkeypatch) -> None:
+    _configure_loop_paths(monkeypatch, tmp_path)
+    git_dir = tmp_path / "gitrepo"
+    git_dir.mkdir()
+    _init_git_repo_for_synth(git_dir)
+    tracked = git_dir / "tracked.txt"
+    tracked.write_text("v1", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=git_dir, check=True)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=git_dir, check=True)
+    tracked.write_text("v2-uncommitted", encoding="utf-8")
+
+    monkeypatch.setattr(orchestrator, "POLL_INTERVAL_SEC", 0.001)
+    artifact_path = tmp_path / "work_report.json"
+
+    data = orchestrator._dispatch_with_artifact_fallback(
+        role="worker",
+        dispatch_call=lambda: None,
+        artifact_path=artifact_path,
+        task_id="T-SYN",
+        round_num=1,
+        run_id="r-syn",
+        timeout_sec=0.05,
+        synthesize_on_missing=True,
+        synthesize_cwd=git_dir,
+    )
+
+    assert isinstance(data, dict)
+    assert data["status"] == "partial"
+    assert data["task_id"] == "T-SYN"
+    assert data["round"] == 1
+    assert data["head_sha"]
+    assert "tracked.txt" in data["files_changed"]
+    assert artifact_path.exists()
+    loaded = json.loads(artifact_path.read_text(encoding="utf-8"))
+    assert loaded["status"] == "partial"
+    assert loaded["task_id"] == "T-SYN"
+
+
+def test_dispatch_fallback_raises_without_synthesize(tmp_path: Path, monkeypatch) -> None:
+    _configure_loop_paths(monkeypatch, tmp_path)
+    git_dir = tmp_path / "gitrepo"
+    git_dir.mkdir()
+    _init_git_repo_for_synth(git_dir)
+    (git_dir / "tracked.txt").write_text("v1", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=git_dir, check=True)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=git_dir, check=True)
+
+    monkeypatch.setattr(orchestrator, "POLL_INTERVAL_SEC", 0.001)
+    artifact_path = tmp_path / "work_report.json"
+
+    with pytest.raises(RuntimeError):
+        orchestrator._dispatch_with_artifact_fallback(
+            role="worker",
+            dispatch_call=lambda: None,
+            artifact_path=artifact_path,
+            task_id="T-SYN",
+            round_num=1,
+            run_id="r-syn",
+            timeout_sec=0.05,
+            synthesize_on_missing=False,
+            synthesize_cwd=git_dir,
+        )
+    assert not artifact_path.exists()
+
+
+def test_enrich_preserves_partial_status() -> None:
+    report: orchestrator.WorkReport = {
+        "task_id": "T-SYN",
+        "round": 1,
+        "head_sha": "head-sha",
+        "status": "partial",
+    }
+    orchestrator._enrich_work_report_runtime_fields(
+        report,
+        backend=orchestrator.BACKEND_OPENCODE,
+        duration_ms=1,
+        status="completed",
+    )
+    assert report["status"] == "partial"
+
+
 def test_auto_dispatch_role_dispatch_event_ordering_includes_artifact_boundary(monkeypatch) -> None:
     events: list[tuple[str, dict[str, object]]] = []
     state = {
@@ -2177,6 +2295,8 @@ def test_auto_dispatch_role_dispatch_event_ordering_includes_artifact_boundary(m
         task_id: str,
         round_num: int,
         timeout_sec: int = orchestrator.DEFAULT_DISPATCH_ARTIFACT_TIMEOUT_SEC,
+        synthesize_on_missing: bool = False,
+        synthesize_cwd: Path | None = None,
     ) -> dict:
         _ = (role, artifact_path, timeout_sec)
         dispatch_call()
@@ -2235,6 +2355,8 @@ def test_auto_dispatch_role_clears_sessions_on_permanent_dispatch_error(tmp_path
         task_id: str,
         round_num: int,
         timeout_sec: int = orchestrator.DEFAULT_DISPATCH_ARTIFACT_TIMEOUT_SEC,
+        synthesize_on_missing: bool = False,
+        synthesize_cwd: Path | None = None,
     ) -> dict:
         _ = (role, artifact_path, task_id, round_num, timeout_sec)
         dispatch_call()
