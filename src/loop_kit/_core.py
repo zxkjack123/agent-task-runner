@@ -8443,11 +8443,22 @@ def _persist_knowledge_updates(updates: KnowledgeUpdates, paths: LoopPaths | Non
             _log(f"Warning: failed to persist pitfalls: {e}")
     patterns = updates.get("patterns")
     if isinstance(patterns, list) and patterns:
-        entries = [_normalize_pattern_entry({"pattern": p, "category": "auto"}) for p in patterns]
-        try:
-            _write_patterns_jsonl(entries, paths=resolved_paths)
-        except OSError as e:
-            _log(f"Warning: failed to persist patterns: {e}")
+        source_version = _source_version_from_file(resolved_paths.patterns)
+        now_utc = datetime.now(UTC)
+        normalized_entries: list[dict] = []
+        for p in patterns:
+            entry, _entry_changed, _stale = _normalize_pattern_entry(
+                {"pattern": p, "category": "auto"},
+                now_utc=now_utc,
+                source_version=source_version,
+            )
+            if entry is not None:
+                normalized_entries.append(entry)
+        if normalized_entries:
+            try:
+                _write_patterns_jsonl(normalized_entries, paths=resolved_paths)
+            except OSError as e:
+                _log(f"Warning: failed to persist patterns: {e}")
 
 
 def _load_config_from_yaml(path: Path) -> dict:
