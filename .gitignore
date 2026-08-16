@@ -10,3 +10,5 @@ build/
 uv.lock
 nul
 .coverage
+/answer.py
+/greet.py
