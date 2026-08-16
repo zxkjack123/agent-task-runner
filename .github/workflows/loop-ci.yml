@@ -34,7 +34,7 @@ jobs:
         run: uv sync --frozen --group dev
 
       - name: Run tests with coverage
-        run: uv run --group dev --with pytest-cov pytest --cov=src/loop_kit --cov-report=xml --junitxml=pytest-results.xml
+        run: uv run --group dev --with pytest-cov pytest -m "not e2e" --cov=src/loop_kit --cov-report=xml --junitxml=pytest-results.xml
 
       - name: Run integration tests (if present)
         shell: bash
