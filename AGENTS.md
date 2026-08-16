@@ -38,7 +38,7 @@
 
 ## Testing
 
-- `uv run --group dev pytest` to run all tests.
+- `uv run --group dev pytest` to run all tests (e2e excluded by default via `addopts = -m "not e2e"`; run e2e separately with `uv run --group dev pytest -m e2e` — e2e runs in a `tmp_path` git repo and never commits to this repository).
 - Use `tmp_path` fixture for filesystem tests.
 - Mock `subprocess.run`/`subprocess.Popen` for dispatch tests.
 - `_configure_loop_paths` mutates module globals — always pair with `monkeypatch.setattr`.

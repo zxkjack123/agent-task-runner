@@ -116,3 +116,11 @@
 
 ### Tests
 - `pytest -m "not e2e"` → 599 passed / 1 pre-existing failed / 1 skipped / 3 deselected (deterministic repeat: 600 passed / 1 pre-existing failed / 1 skipped).
+
+### E2E Self-Test Isolation (PM #2675, 2026-08-14)
+- **tmp-repo e2e isolation**: `tests/test_e2e_smoke.py` now runs the loop inside a throwaway git repo under `tmp_path` (`git init` + minimal loop skeleton) instead of the real repository — loop commits can never reach master history again.
+- **answer.py/greet.py removal**: e2e worker artifacts removed from repo root and anchored in `.gitignore`.
+- **uv.lock sync**: uv 0.6.0→0.6.1 lockfile drift committed.
+- **pytest addopts**: default `pytest` run excludes e2e (`-m "not e2e"`); CI (`loop-ci.yml`) synced accordingly. Run e2e explicitly with `pytest -m e2e`.
+- **`_persist_knowledge_updates` fix**: reviewer knowledge pattern persistence no longer crashes on `_normalize_pattern_entry` signature mismatch.
+- Independent acceptance: PASS (0 blocking defects) — 3 consecutive full pytest runs left HEAD pinned at `36a5bcf`; e2e 3 passed (~500s); commits `36a5bcf` `2723361` `9d1d6db` `995c7e8` `3eb7193` (+ revert pair `f6bc215`→`05e3801` retained for audit).

@@ -357,6 +357,8 @@ uv run python -m loop_kit init
 
 CI runs on push/PR: tests, coverage, ruff, optional mypy.
 
+> **Note**: `uv run --group dev pytest` excludes e2e tests by default (`addopts = -m "not e2e"`). Run the e2e smoke suite separately with `uv run --group dev pytest -m e2e` — it executes the loop inside a temporary git repo (`tmp_path`), so it never touches this repository's history.
+
 </details>
 
 ## License
