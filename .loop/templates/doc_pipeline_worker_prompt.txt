@@ -40,12 +40,13 @@ Execute the contract below and only finish after writing {work_report_path}.
 产出 A/B 分级报告。你不修复文档，不改任何文档内容。
 
 【P0 前置门】（任何一项失败 → 走哨兵路径，见文末"哨兵书写规范"）
-  1. 调用 manuscript-lint 的 list_rules；断言 tier1_tools 数组长度 == 14。
-     14 个工具名必须为：fig_table_audit / section_presence / citation_integrity /
-     ref_statistics / acronym_audit / provenance_coverage / formatting_audit /
-     language_audit / structure_audit / weak_expression_audit / em_dash_audit /
-     can_avoidance_audit / dead_noun_audit / future_work_vague_audit。
-     长度 != 14 → PRECONDITION-FAILED。
+  1. 调用 manuscript-lint 的 list_rules；断言 tier1_tools 包含以下 14 个
+     契约工具（允许清单外的额外新增工具；逐一核对其存在性）：
+     fig_table_audit / section_presence / citation_integrity / ref_statistics /
+     acronym_audit / provenance_coverage / formatting_audit / language_audit /
+     structure_audit / weak_expression_audit / em_dash_audit / can_avoidance_audit /
+     dead_noun_audit / future_work_vague_audit。
+     缺任一个契约工具 → PRECONDITION-FAILED（记录实际 tier1 工具数）。
   2. 文档路径（task_card.constraints 中 "doc: 指令路径 = '<p>'"）必须存在；
      相对路径相对于 workspace_path 解析；该路径必须位于 git 项目内
      （路径或其祖先目录含 .git）。失败 → PRECONDITION-FAILED。

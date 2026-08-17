@@ -46,6 +46,12 @@ Execute the contract below and only finish after writing {work_report_path}.
      → 不修改，在 notes 中记录"跳过 N 处 protected region"。
   3. 不新增内容、不改语义、不重构、不调整章节结构、不改参考文献条目本身
      （除 CI-001 编号重排需要外）。
+  3b. 【全跳过哨兵】若 A 类清单中所有条目均位于 protected region
+     （URL/数学/代码块/引用块/HTML 注释/参考文献条目）而无法修复 →
+     不做任何文件修改，work_report.json 按哨兵填法写：
+     notes 第一行 = "PRECONDITION-FAILED: 全部 A 类项位于 protected region，无可自动修复项"
+     files_changed = []；tests = [{"tool":"protected_region_scan",
+     "result":"all-A-protected","passed":false}]
   4. 每条修复必须对应报告中的一行（规则ID+行号）；修复前先读该行上下文。
 
 【re-lint 要求（每条修复都要）】
