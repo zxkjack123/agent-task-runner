@@ -120,6 +120,6 @@ bash 的 git add / git commit（仅限报告文件）
 P0 门任一失败 → 不执行 Step 1-5、不建子任务、不改任何文件；
 work_report.json 按以下填法写：
   notes 第一行 = "PRECONDITION-FAILED: <原因>"（字面量开头，含冒号，原样）
-  files_changed = []；tests = [{"tool":"list_rules","result":"tier1=<n>","passed":false}]
+  files_changed = []；tests = [{{"tool":"list_rules","result":"tier1=<n>","passed":false}}]
   round = {round_num}
 审阅者将据此批准（这是流水线的正确终态之一，不是失败）。

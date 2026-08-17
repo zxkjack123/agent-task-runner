@@ -42,7 +42,7 @@ Execute the contract below and only finish after writing {work_report_path}.
 【只修 A 类，禁止越界】
   1. 只修 A 类标记项；B 类不修。报告未列出的内容一律不动。
   2. protected region 跳过：LaTeX math（$$..$$ / \(..\) / equation 环境）、
-     URL（\url{}/http 链接）、代码块（```..```）、引用块（>）内的 A 类标记
+     URL（\url{{}}/http 链接）、代码块（```..```）、引用块（>）内的 A 类标记
      → 不修改，在 notes 中记录"跳过 N 处 protected region"。
   3. 不新增内容、不改语义、不重构、不调整章节结构、不改参考文献条目本身
      （除 CI-001 编号重排需要外）。
@@ -52,8 +52,8 @@ Execute the contract below and only finish after writing {work_report_path}.
   每条修复完成后，对产生该 finding 的 audit 工具单跑一次
   （如 EMD-001 → manuscript-lint em_dash_audit(path=文档路径)），
   把结果（findings_count 或 "0 findings"）写入 work_report.tests：
-    tests = [{"tool":"em_dash_audit","rule":"EMD-001","file":"<路径>",
-              "line":<行号>,"result":"findings_count=0","passed":true}, ...]
+    tests = [{{"tool":"em_dash_audit","rule":"EMD-001","file":"<路径>",
+              "line":<行号>,"result":"findings_count=0","passed":true}}, ...]
   若重跑仍命中该行 → 修复未生效，不得宣称完成。
 
 【Gate D.2 S1-S8 修复后语义自检（写进 work_report.notes）】
