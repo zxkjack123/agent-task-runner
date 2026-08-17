@@ -676,3 +676,137 @@ Task Executor 在所有 plan task 执行完毕后**必须**运行本节验证命
 
 ```json
 {"error_id": null, "error_type": null, "summary": "loop_kit compat verified with zero code changes; 5/5 compat tests; 1 pre-existing orchestrator failure documented (not a regression)", "root_cause_guess": null, "confidence": "HIGH", "retry_suggestion": null, "affected_files": ["tests/test_doc_pipeline_compat.py"], "blocked_downstream": [], "task_id": "T2.1", "attempted_fixes": [], "timestamp": "2026-08-17T03:10:00Z"}
+
+### [2026-08-17 11:15] Task 2.2a — DONE
+
+- **Task**: 2.2a: 流水线模板镜像（agent-task-runner 侧）
+- **Status**: ✅ DONE — `.loop/templates/doc_pipeline_worker_prompt.txt` + `doc_pipeline_reviewer_prompt.txt` 逐字节镜像；`diff` 空输出（2/2）✓
+
+### [2026-08-17 11:15] Task 2.2b — DONE
+
+- **Task**: 2.2b: doc-fix 模板镜像（agent-task-runner 侧）
+- **Status**: ✅ DONE — `doc_fix_worker_prompt.txt` + `doc_fix_reviewer_prompt.txt` 逐字节镜像；`diff` 空输出（2/2）✓
+
+### [2026-08-17 11:15] Task 2.3 — DONE
+
+- **Task**: 2.3: Phase 2 合并提交 + 范围验证（EC-4b）
+- **Status**: ✅ DONE — commit `c6d6e39` = `feat(loop): doc-pipeline & doc-fix prompt templates + compat checks (PM #2622)`，6 files / 1076+。负向验证：staged 名清单精确 = 计划文件 + 4 模板 + 1 测试；traces/（本执行运行时痕迹）未纳入。commit 后 status 仅剩 `?? traces/`。
+- **注意**: `.loop/` 在 .gitignore（L8），新模板经 `git add -f` 纳入（与既有 2 模板同轨）。
+
+```json
+{"error_id": null, "error_type": null, "summary": "EC-4b satisfied: 1 commit c6d6e39 (plan+4 mirrored templates+1 compat test, diff-verified byte-identical)", "root_cause_guess": null, "confidence": "HIGH", "retry_suggestion": null, "affected_files": [".loop/templates/*"], "blocked_downstream": [], "task_id": "T2.3", "attempted_fixes": [], "timestamp": "2026-08-17T03:15:00Z"}
+
+### [2026-08-17 10:52] Task 3.1 — RUNNING（E2E 首轮暴露主路径缺陷，已 fix-forward）
+
+- **Task**: 3.1: E2E 正向链（进行中）
+- **Status**: 🔄 RUNNING（round 2 of the E2E after fix-forward）
+- **首轮失败根因（重要，供 mode=improve）**: pm_task_create 触发任务后，**主 enqueue 路径** `src/feishu_tools/pm_write_tools.py::_try_enqueue_auto_task`（PM MCP server 进程内调用）调 `build_task_card(..., project)` **未传 tags** → doc:paper 任务走了 LLM 路径生成 "report" 格式卡。计划 Context 快照只标了 dispatcher L297 一个调用点，遗漏此主路径调用点。E2E 首轮（queue id=300）产出错误卡后被 TE 终止。
+- **修复（fix-forward 追加 commit）**: ① `d70bea4` fix(autotask): pm_write_tools 主路径补传 `tags=_parse_tags(row[2])` + 回归测试 test_g（mock LLM 抛异常断言 doc_pipeline 卡）；② `07ba52e` test: 补 json import。③ `systemctl --user restart pm-mcp-http.service` 使运行中的 MCP server 加载新代码（其 00:20 启动时内存中是旧 bridge）。④ 删除错误 queue 行 300 → dispatcher sweep 重入队（id=301）→ 本次正确产出 doc_pipeline 卡 + `_inject_role_pair: injected dedicated doc_pipeline worker+reviewer pair`。
+- **EC-4a 修正**: Phase 1 原 1 commit（29d3111）+ 2 个 fix-forward commit（d70bea4/07ba52e）——按计划"已 commit 后失败 → 追加修正 commit（不 amend）"策略执行。
+- **E2E 第二轮**: loop_dir T-2789-d4a6aa1b，worker opencode 会话运行中。
+
+```json
+{
+  "error_id": "err-20260817-1052-t31",
+  "error_type": "test_failure",
+  "summary": "E2E first run produced LLM 'report' card: primary enqueue path pm_write_tools._try_enqueue_auto_task did not pass tags",
+  "root_cause_guess": "Plan context snapshot missed the pm_write_tools call site; only dispatcher L297 was annotated",
+  "confidence": "HIGH",
+  "retry_suggestion": "Audit ALL build_task_card call sites before E2E (grep build_task_card across repo)",
+  "affected_files": ["src/feishu_tools/pm_write_tools.py", "tests/test_doc_pipeline_routing.py"],
+  "blocked_downstream": [],
+  "task_id": "T3.1",
+  "attempted_fixes": ["fix pm_write_tools tags passthrough + regression test", "restart pm-mcp-http.service", "re-enqueue via dispatcher sweep"],
+  "timestamp": "2026-08-17T02:52:00Z"
+}
+
+### [2026-08-17 11:05] Task 3.1 — RUNNING（第二轮 fix-forward：in_scope 语义修正）
+
+- **Task**: 3.1: E2E 正向链（第三轮 loop 运行中）
+- **Status**: 🔄 RUNNING（loop T-2789-382572d6）
+- **第二轮失败根因**: loop_kit `_build_task_packet`（_core.py L5454+）将 card `in_scope` 每一项当作**文件路径** stat（`resolved.is_file()`）；本计划构造器把 Step 契约长叙述放进 in_scope（150-250 字/条）→ `os.stat` 抛 **ENAMETOOLONG**（>255 字符路径名）→ loop_kit 崩溃（"File name too long: .../P0 前置门: ..."）。短叙述会被 is_file()=False 静默跳过，长叙述直接炸——LLM 卡因 in_scope 多为短句/真实文件而幸免。
+- **修复（fix-forward 追加 commit `51e5d91`）**: 构造器 `in_scope` 改为**纯文件路径/glob**（doc 路径 + `.github/reports/*.md`）；Step 契约全文移入 `constraints`（loop_kit `_render_task_card_section` 逐字渲染，worker 可见）。doc-fix 卡同修。新增回归测试 test_h（in_scope 条目 <200 字符且非叙述）。
+- **旧 loop 清理**: kill PID 696690 进程组；删除 queue 行 301；dispatcher sweep 重新入队（id=302）→ `_inject_role_pair: injected dedicated doc_pipeline worker+reviewer pair` + 确定性卡（Goal 对指定文档执行只读提交前检查…）。
+
+```json
+{
+  "error_id": "err-20260817-1105-t31b",
+  "error_type": "test_failure",
+  "summary": "loop_kit _build_task_packet stats in_scope items as file paths; long narrative strings raise ENAMETOOLONG and crash the loop",
+  "root_cause_guess": "TaskCard schema: in_scope=list of file paths/globs (loop_kit _build_task_packet); narrative program must live in constraints/templates",
+  "confidence": "HIGH",
+  "retry_suggestion": "Keep in_scope to real paths/globs; render fixed programs via constraints + dedicated worker templates",
+  "affected_files": ["src/auto_task/bridge.py", "tests/test_doc_pipeline_routing.py"],
+  "blocked_downstream": [],
+  "task_id": "T3.1",
+  "attempted_fixes": ["move program to constraints; in_scope=paths only; regression test test_h"],
+  "timestamp": "2026-08-17T03:05:00Z"
+}
+
+### [2026-08-17 11:40] Task 3.1 — RUNNING（第三轮 fix-forward：mcp_server 双调用点）
+
+- **Task**: 3.1: E2E 正向链（doc-fix 子任务 loop 运行中）
+- **Status**: 🔄 RUNNING
+- **流水线链已通**: 触发任务 #2789 经 ATR 循环（worker P0 tier1=14 ✓ → full_scan 61 findings → A=18/B=51 分级 → 报告 `.github/reports/doc-pipeline-T2789-20260817.md` 落盘+commit 0265cef（只读契约守住，diff 仅报告文件）→ Step5 pm_task_create #2794 [auto,doc-fix]）→ reviewer approve → PM #2789 status=review/100%（`_mark_done` 路径）。**流水线本体 E2E 通过**。
+- **第三轮失败根因**: doc-fix 子任务 #2794 的卡仍是 LLM 生成——`mcp_server/server.py` 中 pm_task_create 处理器（L3896）与 pm_task_update 处理器（L4214）两个 `build_task_card` 调用点**均未传 tags**（计划 Context 快照只标了 dispatcher 一个调用点；pm_write_tools 为第二个，E2E 首轮暴露；mcp_server/server.py 为第三/四个，E2E 第二轮暴露）。全仓审计后共 4 个调用点全部修复。
+- **修复（commit `cef1f95`）**: server.py 两调用点补 `tags=tags` / `tags=new_tags`；重启 pm-mcp-http.service；kill 错误卡 loop、删 queue 304 → dispatcher sweep 重入队（305）→ `_inject_role_pair: injected dedicated doc_fix worker+reviewer pair` + 确定性 doc_fix 卡（in_scope=报告/文档路径）。
+- **教训（供 mode=improve）**: 新增确定性路由时，必须全仓 grep 所有 build_task_card 调用点（dispatcher / pm_write_tools / mcp_server 三处模块）。
+
+```json
+{
+  "error_id": "err-20260817-1140-t31c",
+  "error_type": "test_failure",
+  "summary": "mcp_server/server.py pm_task_create/update handlers call build_task_card without tags (2 more call sites beyond the plan's snapshot)",
+  "root_cause_guess": "Plan context snapshot only annotated the dispatcher call site; routing change requires exhaustive call-site audit",
+  "confidence": "HIGH",
+  "retry_suggestion": "grep -rn 'build_task_card(' across repo before/after routing changes",
+  "affected_files": ["mcp_server/server.py"],
+  "blocked_downstream": [],
+  "task_id": "T3.1",
+  "attempted_fixes": ["patch both server.py call sites", "restart pm-mcp-http.service", "re-enqueue via sweep"],
+  "timestamp": "2026-08-17T03:40:00Z"
+}
+
+### [2026-08-17 15:40] Task 3.1 — DONE
+
+- **Task**: 3.1: E2E 正向链（fixture → 报告 A/B → doc-fix 子任务 → done → diff 只含 A 类修复）
+- **Status**: ✅ DONE（全链通过）
+- **五步验证**:
+  1. ✅ 报告 `/home/gw/tmp/opencode/doc-e2e-pos/.github/reports/doc-pipeline-T2789-20260817.md` 列头精确匹配 EC-7（`| 规则ID | A/B | 位置(文件:行) | 证据 | 建议修复 | severity |`），69 行带 A/B 标记。
+  2. ✅ doc-fix 子任务 #2794（tags=[auto,doc-fix]，project=agent-task-runner）。
+  3. ✅ 子任务 ATR 循环至 done：round1 worker 修复 12 类 A 缺陷（17+/17-）+ 13 条 re-lint 证据 → reviewer changes_required（唯一阻塞项：commit message 未填 PM 模板）→ round2 amend 修 commit message（e6acfae→2dfc2fa `[PM#2794]`）→ reviewer approve → outcome=approved → PM #2794 review/100%。
+  4. ✅ doc-fix diff（2dfc2fa）仅 A 类修复：10 行 `+<!-- FIXTURE-A` 对应改动；B 类标记（FIXTURE-B-1..4）零改动；protected 注释保留。
+  5. ✅ work_report 附 re-lint 证据（round1: 13 条单工具重跑 findings_count=0；round2: commit audit）。
+- **环境处置（用户裁定）**: doc-fix worker 连续 15 次死于 deepseek provider 120s 超时（`~/.config/opencode/opencode.jsonc` L238）→ 经用户批准改为 timeout=300000/headerTimeout=60000/chunkTimeout=120000（备份 opencode.jsonc.bak-pm2622-timeout-*）→ 改后首轮即通过。
+- **追加 fix-forward commits（本任务期间）**: d70bea4/07ba52e/51e5d91/399a9e2/cef1f95/bb81b83（project_management）+ 7b8ff54/9b51310（agent-task-runner）。
+- **关键教训（供 mode=improve）**: (1) build_task_card 全仓 4 个调用点（dispatcher/pm_write_tools/mcp_server×2）须全部透传 tags；(2) TaskCard.in_scope 是文件路径列表，叙述程序必须放 constraints/模板；(3) 模板字面大括号须 {{}} 转义；(4) doc-fix notes 契约必须含 workspace: 行；(5) LLM 长会话对 provider 超时敏感。
+
+```json
+{"error_id": null, "error_type": null, "summary": "T3.1 E2E positive chain PASSED: pipeline approved + report A/B(69 rows) + doc-fix #2794 approved round2 + diff A-class-only + re-lint evidence", "root_cause_guess": null, "confidence": "HIGH", "retry_suggestion": null, "affected_files": [], "blocked_downstream": [], "task_id": "T3.1", "attempted_fixes": ["5 fix-forward commits", "deepseek provider timeout 120s→300s (user-approved)"], "timestamp": "2026-08-17T07:40:00Z"}
+
+### [2026-08-17 17:30] Task 3.2 — DONE
+
+- **Task**: 3.2: E2E 负向链（protected-region 陷阱 → blocked + 通知）
+- **Status**: ✅ DONE
+- **证据**:
+  - 负向 fixture `/home/gw/tmp/opencode/doc-e2e-neg/sample_paper.md`：6 个 EMD-001 A 类缺陷全部位于 protected region（\url{} URL ×2 + HTML 注释 ×3 + References 条目 ×1）。
+  - 触发 #2815 → 流水线（P0 子集门通过 tier1=16 ⊇ 14 契约工具 → full_scan 31 findings → A=6/B=29 分级 → 报告落盘+commit 7bafeb4 → Step5 建 doc-fix #2817）→ 触发任务 review/100 ✓（不受子任务影响）。
+  - doc-fix worker：逐条核对全部 protected → **全跳过哨兵**（notes 首行 PRECONDITION-FAILED: 全部 A 类项位于 protected region，无可自动修复项；files_changed=[]）→ loop noop-as-success 终态 → M5 哨兵分支 → **PM #2817 = blocked/100** ✓ + notes 含 `ATR-PRECONDITION_FAILED` 节。
+  - 通知链路：孤儿 guard 首次尝试缺 FEISHU 凭据（unit 无 EnvironmentFile）→ 加 drop-in `~/.config/systemd/user/atr-orphan-guard.service.d/override.conf`（复用 auto-dispatcher.env）→ 实发验证 `Feishu notification sent for T-2817 (msg_id=om_x100b671911101cb0b3c06f2800b9c72)` ✓。
+- **⚠️ 机制偏差（记录）**: 计划预期「worker 违禁修改 → reviewer 3 轮拒绝 → max_rounds_exhausted → blocked」；实际执行中 worker 严格遵守保护纪律（全跳过），走「全跳过哨兵 → noop-as-success → M5 哨兵分支 → blocked」。终态与验收完全一致（blocked + 通知），但机制为哨兵路径而非 3 轮拒绝路径。为此加固：reviewer 模板 3b（全跳过 → changes_required）+ worker 模板 3b（全跳过哨兵）+ bridge noop-as-success（doc 格式）+ 哨兵分支前置（doc-task 快路径与 orphan-guard 双处）。
+- **本轮 fix-forward commits**: 064b18e/d24546c（reviewer 3b）· 90ad5c1/6f1a16f（noop-as-success + P0 子集门 + 3b 哨兵）· 9325f79/595aa0c（大括号转义 + render 回归测试）· 6ef3835（哨兵前置 doc-task 快路径）· b7dc7f4（orphan-guard 哨兵）。
+- **新发现（环境）**: 并发 MANUSCRIPT-LINT 项目新增 2 个 tier1 工具（table_math_invariant/enum_cardinality），P0 门从「==14」改为「14 契约工具 ⊆ tier1」子集语义。
+
+```json
+{"error_id": null, "error_type": null, "summary": "T3.2 negative chain PASSED: doc-fix #2817 blocked/100 with PRECONDITION_FAILED notes + feishu sent (msg_id verified)", "root_cause_guess": null, "confidence": "HIGH", "retry_suggestion": null, "affected_files": [], "blocked_downstream": [], "task_id": "T3.2", "attempted_fixes": ["sentinel-first in doc-task fast path", "orphan-guard sentinel honor", "orphan-guard env drop-in"], "timestamp": "2026-08-17T09:30:00Z"}
+
+### [2026-08-17 17:40] Task 3.3 — DONE
+
+- **Task**: 3.3: P0 前置门 + 报告格式复核（EC-7 收口）
+- **Status**: ✅ DONE
+- **复核①**: 新会话 list_rules → tier1_tools=16，14 契约工具逐一在场（YES×14，见 T3.2 日志的 P0 子集语义修订）。
+- **复核②**: 正向报告 `/home/gw/tmp/opencode/doc-e2e-pos/.github/reports/doc-pipeline-T2789-20260817.md` 与负向报告 `/home/gw/tmp/opencode/doc-e2e-neg/.github/reports/doc-pipeline-T2815-20260817.md` 列头均精确匹配 EC-7：`| 规则ID | A/B | 位置(文件:行) | 证据 | 建议修复 | severity |`。
+- **复核③**: 哨兵路径代码级证据 = `tests/test_doc_pipeline_bridge.py` 7/7 + 两次真实 E2E 演练（#2815 首轮 P0 门哨兵（tier1=16≠14 旧契约）+ #2817 all-skip 哨兵 → 双路径均实测 blocked）。
+
+```json
+{"error_id": null, "error_type": null, "summary": "T3.3 rechecks pass: tier1=16 superset of 14 contract tools; EC-7 columns exact in both reports; sentinel validated by 7 unit tests + 2 live E2E runs", "root_cause_guess": null, "confidence": "HIGH", "retry_suggestion": null, "affected_files": [], "blocked_downstream": [], "task_id": "T3.3", "attempted_fixes": [], "timestamp": "2026-08-17T09:40:00Z"}
