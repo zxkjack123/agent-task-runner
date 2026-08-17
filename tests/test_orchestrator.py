@@ -3905,6 +3905,7 @@ class TestKnowledgeCli:
         facts_path, pitfalls_path, patterns_path = _configure_default_knowledge_paths(monkeypatch, tmp_path)
         _write_jsonl(facts_path, [{"fact": "single-file rule", "category": "facts"}])
         _write_jsonl(pitfalls_path, [{"pitfall": "stale lock", "category": "pitfalls"}])
+        fresh_source_version = (datetime.now(UTC) - timedelta(days=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
         _write_jsonl(
             patterns_path,
             [
@@ -3913,7 +3914,7 @@ class TestKnowledgeCli:
                     "category": "workflow",
                     "confidence": 0.9,
                     "source": "manual",
-                    "source_version": "2026-04-01T00:00:00Z",
+                    "source_version": fresh_source_version,
                 }
             ],
         )
@@ -8634,13 +8635,14 @@ class TestCmdStatus:
             encoding="utf-8",
         )
         (context_dir / "pitfalls.md").write_text("# pitfalls\n- stale lock\n", encoding="utf-8")
+        fresh_last_verified = (datetime.now(UTC) - timedelta(days=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
         (context_dir / "patterns.jsonl").write_text(
             json.dumps(
                 {
                     "pattern": "fresh pattern",
                     "category": "workflow",
                     "confidence": 0.9,
-                    "last_verified": "2026-04-01T12:00:00Z",
+                    "last_verified": fresh_last_verified,
                 },
                 ensure_ascii=False,
             )
