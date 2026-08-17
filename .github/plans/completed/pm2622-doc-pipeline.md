@@ -810,3 +810,19 @@ Task Executor 在所有 plan task 执行完毕后**必须**运行本节验证命
 
 ```json
 {"error_id": null, "error_type": null, "summary": "T3.3 rechecks pass: tier1=16 superset of 14 contract tools; EC-7 columns exact in both reports; sentinel validated by 7 unit tests + 2 live E2E runs", "root_cause_guess": null, "confidence": "HIGH", "retry_suggestion": null, "affected_files": [], "blocked_downstream": [], "task_id": "T3.3", "attempted_fixes": [], "timestamp": "2026-08-17T09:40:00Z"}
+
+### Post-Execution Verification Log
+
+| ID | 描述 | Command | Result |
+|----|------|---------|--------|
+| V1 | pm 路由+哨兵单测 | `python -m pytest tests/test_doc_pipeline_routing.py tests/test_doc_pipeline_bridge.py -v` | ✅ 15/15 pass |
+| V2 | pm 既有回归 | `python -m pytest tests/test_full_chain.py tests/test_bridge_partial_success.py -q` | ✅ 33/33 pass |
+| V3 | atr 兼容+回归 | `uv run --group dev pytest tests/test_doc_pipeline_compat.py tests/test_orchestrator.py -q` | ✅ 573/573 pass（T2.1 记录的预存在失败已由并发 #2747 工作流修复） |
+| V4 | 模板镜像一致性 | diff ×4 | ✅ 4/4 IDENTICAL |
+| V5 | 双仓 commit 范围 | `git log --oneline --since=2026-08-17` grep 2622 | ✅ pm 13 commits（1 feat + 11 fix-forward + 1 changelog）；atr 9 commits（1 feat + 5 fix + 2 docs + 1 archive） |
+| P1 | 新会话 list_rules | opencode run 冒烟 | ✅ tier1=16 ⊇ 14 契约工具（YES×14） |
+| P2 | pm_task_get(2622) | 回读 | ✅ status=review, progress=95, notes 含执行摘要 |
+| D1 | timer 状态 | systemctl --user list-timers | ✅ auto-dispatcher.timer 正常（dispatcher 每周期新进程，无需重启） |
+| M1 | 正向报告人工复核 | 人工 | ⏸ PENDING MANUAL（路径见 T3.1 日志） |
+| M2 | 负向 diff 为空复核 | 人工 | ⏸ PENDING MANUAL（doc-fix #2817 diff 为空 + blocked 理由已在 T3.2 日志） |
+| M3 | 双仓 commit diff 终审 | 人工 | ⏸ PENDING MANUAL |
