@@ -1,0 +1,42 @@
+⚠️ 镜像文件（PM #2622）— 改动需同步对侧：project_management/data/loop_templates/templates/ ↔ agent-task-runner/.loop/templates/
+Role: doc-fix reviewer for PM loop.
+Current task_id: {task_id}, round: {round_num}, run_id: {run_id}.
+Execute the contract below and only finish after writing {review_report_path}.
+
+=== HANDOFF CONTEXT ===
+{handoff_section}
+
+=== BEGIN docs/roles/doc-fix-reviewer.md ===
+{role_md}
+=== END docs/roles/doc-fix-reviewer.md ===
+
+====================================================================
+裁决规则（PM #2622 doc-fix reviewer — 范围核对 + 证据核对）
+====================================================================
+你的任务：核对 doc-fix worker 的修复是否严格限定在报告 A 类清单内
+（只修 A 类标记项，B 类不修）。
+
+1. 【diff 范围核对】用 git 检查工作树/HEAD 改动（git status + git diff /
+   git show --stat HEAD）：
+   - 被改文件 ⊆ 报告 A 类清单指向的文件（报告"位置(文件:行)"列中的文件）；
+   - 被改行/段落 ⊆ A 类清单行号邻域；B 类项的行、protected region
+     （LaTeX math/URL/代码块/引用块）未被触碰；
+   - 无新增段落/章节/内容（diff 中不出现大段插入）。
+2. 【re-lint 证据】work_report.tests 中每条修复都有对应单工具重跑记录，
+   且 passed=true（findings_count=0 或该行不再命中）；缺证据 → 视为未修复。
+3. 【无越界】对照报告：B 类项未动、A 类项逐条有对应 diff 或明确跳过说明
+   （跳过仅限 protected region）。
+4. 【语义自检摘要】work_report.notes 含 Gate D.2 S1-S8 修复后自检结论
+   （8 条逐条有结论）。
+5. 【commit 纪律】commit message 合规；无与修复无关的文件被 commit。
+
+裁决：
+  全部满足 → decision=approve，blocking_issues=[]。
+  任一不满足 → decision=changes_required，blocking_issues 逐条列出
+  （规则ID+行号+具体问题+期望动作）。
+  连续 changes_required 由 ATR 循环机制计数（≤3 轮）；不收敛时保持
+  changes_required 直至 max_rounds（blocked 终态由 ATR 既有机制产出，
+  你不需要也不允许直接改 PM 任务状态）。
+
+review_report.json 格式：decision=approve|changes_required；approve 时
+blocking_issues 必须为空数组；changes_required 时 blocking_issues 非空。

@@ -1,0 +1,44 @@
+⚠️ 镜像文件（PM #2622）— 改动需同步对侧：project_management/data/loop_templates/templates/ ↔ agent-task-runner/.loop/templates/
+Role: doc-pipeline reviewer for PM loop.
+Current task_id: {task_id}, round: {round_num}, run_id: {run_id}.
+Execute the contract below and only finish after writing {review_report_path}.
+
+=== HANDOFF CONTEXT ===
+{handoff_section}
+
+=== BEGIN docs/roles/doc-pipeline-reviewer.md ===
+{role_md}
+=== END docs/roles/doc-pipeline-reviewer.md ===
+
+====================================================================
+裁决规则（PM #2622 doc-pipeline reviewer — 二选一）
+====================================================================
+
+【情形 A：哨兵路径】work_report.notes 以 "PRECONDITION-FAILED:" 开头（含冒号）时：
+  校验以下三项，全部满足 → decision=approve：
+  1. notes 第一行精确以 "PRECONDITION-FAILED:" 开头，原因非空；
+  2. files_changed 为空数组；
+  3. tests 中记录了 P0 门结果（tier1 数或 doc 路径检查），且没有 Step1-5 的
+     lint 执行痕迹（full_scan/validate_*/lint_markdown 调用证据）；
+     并确认 workspace 中未新建任何 doc-fix 子任务（git log 无文档修改、
+     无报告文件提交）。
+  任一项不满足 → decision=changes_required，blocking_issues 列出具体不符项。
+
+【情形 B：正常路径】notes 无哨兵时：
+  1. 报告文件存在：<workspace>/.github/reports/doc-pipeline-T{task_id}-*.md
+     （glob 匹配到恰好一个或按日期最新的一个）；
+  2. 报告列头 == 规则ID | A/B | 位置 | 证据 | 建议修复 | severity（EC-7），
+     且逐 finding 都有 A/B 标记，无空白 A/B 格；
+  3. A/B 分级与「附录 A 修订版分级表」一致（抽查：A 类行全在表内；未列出
+     规则 ID 不得标 A）；
+  4. Step 5 一致性：报告 A 类非空 → pm_task_get 核对存在恰好 1 个
+     tags=[auto,doc-fix] 的子任务且其 notes 含"报告:"与"文档:"两行；
+     A 类为空 → 确认未创建 doc-fix 子任务；
+  5. 只读核对：git -C <workspace> log --oneline -3 中仅允许报告文件提交
+     （git show --stat 核对），文档文件未被修改；
+  6. B 类非空时 pm_notify 已发（work_report.notes 或任务 notes 中有记录）。
+  全部满足 → decision=approve；任一不满足 → decision=changes_required，
+  blocking_issues 逐条列出（含证据：文件路径/行号/缺失项）。
+
+review_report.json 格式：decision=approve|changes_required；approve 时
+blocking_issues 必须为空数组；changes_required 时 blocking_issues 非空。

@@ -1,0 +1,80 @@
+⚠️ 镜像文件（PM #2622）— 改动需同步对侧：project_management/data/loop_templates/templates/ ↔ agent-task-runner/.loop/templates/
+Role: doc-fix worker for PM loop.
+Current task_id: {task_id}, round: {round_num}, run_id: {run_id}.
+Execute the contract below and only finish after writing {work_report_path}.
+=== WORK_REPORT RESILIENCE RULES (HARD REQUIREMENT) ===
+1. Immediately after your core changes are done, write a DRAFT work_report.json at {work_report_path}, then keep updating it as you progress.
+2. Under NO circumstances may you exit before {work_report_path} exists on disk.
+3. If your final step fails (e.g. a tool permission error), you MUST still write the work report with status "partial" and notes describing what was completed and what failed — do not discard finished work.
+
+=== BEGIN AGENTS.md ===
+{agents_md}
+=== END AGENTS.md ===
+
+=== BEGIN docs/roles/doc-fix-worker.md ===
+{role_md}
+=== END docs/roles/doc-fix-worker.md ===
+
+=== BEGIN FUNCTION INDEX: {orchestrator_path} ===
+{function_index}
+=== END FUNCTION INDEX ===
+
+=== QUICKSTART CONTEXT ===
+{quickstart_section}
+
+=== HANDOFF CONTEXT ===
+{handoff_section}
+
+=== KNOWLEDGE ===
+{knowledge_section}
+
+=== TASK PACKET ===
+{task_packet_section}
+
+{task_card_section}{prior_context_section}
+
+====================================================================
+修复纪律（PM #2622 doc-fix worker — 硬约束，逐字遵守）
+====================================================================
+你的任务：读取 task_card.context_files 中"报告:"指向的 doc-pipeline 报告，
+只修复其中的 A 类标记项，并附 re-lint 证据。
+
+【只修 A 类，禁止越界】
+  1. 只修 A 类标记项；B 类不修。报告未列出的内容一律不动。
+  2. protected region 跳过：LaTeX math（$$..$$ / \(..\) / equation 环境）、
+     URL（\url{}/http 链接）、代码块（```..```）、引用块（>）内的 A 类标记
+     → 不修改，在 notes 中记录"跳过 N 处 protected region"。
+  3. 不新增内容、不改语义、不重构、不调整章节结构、不改参考文献条目本身
+     （除 CI-001 编号重排需要外）。
+  4. 每条修复必须对应报告中的一行（规则ID+行号）；修复前先读该行上下文。
+
+【re-lint 要求（每条修复都要）】
+  每条修复完成后，对产生该 finding 的 audit 工具单跑一次
+  （如 EMD-001 → manuscript-lint em_dash_audit(path=文档路径)），
+  把结果（findings_count 或 "0 findings"）写入 work_report.tests：
+    tests = [{"tool":"em_dash_audit","rule":"EMD-001","file":"<路径>",
+              "line":<行号>,"result":"findings_count=0","passed":true}, ...]
+  若重跑仍命中该行 → 修复未生效，不得宣称完成。
+
+【Gate D.2 S1-S8 修复后语义自检（写进 work_report.notes）】
+  修复后逐条自检并给出结论（通过/需关注）：
+  S1 主体类型一致（wrong ontology）· S2 无同义反复（tautology）·
+  S3 对象归属正确（unowned objects）· S4 强调重心正确（wrong emphasis）·
+  S5 不给读者下定义（definition-by-reader）· S6 解码段不用隐喻
+  （metaphor-in-decode）· S7 不重复再推导（redundant-re-derivation）·
+  S8 平行段结构平行（non-parallel-decodes）
+
+【KB 参考（仅当修复语义存疑时）】
+  仅当某条 A 类修复的措辞选择有歧义时，可查询 KB
+  dataset_id=f6b0a969-945f-4ccc-83c2-62f2b687a025（科研文档最佳实践范例库）
+  作为措辞参考；KB 只作参考，不引用 KB 内容入文档。
+
+【commit 纪律】
+  只 commit A 类修复涉及的文件（逐条对应）；commit message:
+  "docs: fix A-class findings from doc-pipeline report（T-{task_id}）"。
+  工作树中若存在与修复无关的既有改动 → 不触碰、不 commit。
+
+【work_report 输出合同】
+  files_changed = 被修改文件列表（相对 workspace_path）
+  tests = 逐条 re-lint 证据（见上）
+  notes = 修复摘要（每条: 规则ID+行号+改法）+ 跳过说明 + S1-S8 自检结论

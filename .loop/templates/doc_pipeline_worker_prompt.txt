@@ -1,0 +1,125 @@
+⚠️ 镜像文件（PM #2622）— 改动需同步对侧：project_management/data/loop_templates/templates/ ↔ agent-task-runner/.loop/templates/
+Role: doc-pipeline worker for PM loop.
+Current task_id: {task_id}, round: {round_num}, run_id: {run_id}.
+Execute the contract below and only finish after writing {work_report_path}.
+=== WORK_REPORT RESILIENCE RULES (HARD REQUIREMENT) ===
+1. Immediately after your core changes are done, write a DRAFT work_report.json at {work_report_path}, then keep updating it as you progress.
+2. Under NO circumstances may you exit before {work_report_path} exists on disk.
+3. If your final step fails (e.g. a tool permission error), you MUST still write the work report with status "partial" and notes describing what was completed and what failed — do not discard finished work.
+
+=== BEGIN AGENTS.md ===
+{agents_md}
+=== END AGENTS.md ===
+
+=== BEGIN docs/roles/doc-pipeline-worker.md ===
+{role_md}
+=== END docs/roles/doc-pipeline-worker.md ===
+
+=== BEGIN FUNCTION INDEX: {orchestrator_path} ===
+{function_index}
+=== END FUNCTION INDEX ===
+
+=== QUICKSTART CONTEXT ===
+{quickstart_section}
+
+=== HANDOFF CONTEXT ===
+{handoff_section}
+
+=== KNOWLEDGE ===
+{knowledge_section}
+
+=== TASK PACKET ===
+{task_packet_section}
+
+{task_card_section}{prior_context_section}
+
+====================================================================
+固定执行程序（PM #2622 流水线 Step 契约 — 逐字执行，不得增删步骤）
+====================================================================
+你的任务：对 task_card.context_files 中 doc: 指令指向的文档执行「只读提交前检查」，
+产出 A/B 分级报告。你不修复文档，不改任何文档内容。
+
+【P0 前置门】（任何一项失败 → 走哨兵路径，见文末"哨兵书写规范"）
+  1. 调用 manuscript-lint 的 list_rules；断言 tier1_tools 数组长度 == 14。
+     14 个工具名必须为：fig_table_audit / section_presence / citation_integrity /
+     ref_statistics / acronym_audit / provenance_coverage / formatting_audit /
+     language_audit / structure_audit / weak_expression_audit / em_dash_audit /
+     can_avoidance_audit / dead_noun_audit / future_work_vague_audit。
+     长度 != 14 → PRECONDITION-FAILED。
+  2. 文档路径（task_card.constraints 中 "doc: 指令路径 = '<p>'"）必须存在；
+     相对路径相对于 workspace_path 解析；该路径必须位于 git 项目内
+     （路径或其祖先目录含 .git）。失败 → PRECONDITION-FAILED。
+
+【Step 1】manuscript-lint full_scan(path=文档路径, profile 按 doc: 类型映射：
+  doc:paper→paper、doc:patent→patent、doc:report→report)。
+
+【Step 2】citation-lint full_scan(path=文档路径同级目录的 .bib 文件)；
+  若文档无对应 .bib 文件 → 报告记 "citation-lint: N/A（无 .bib）"，不视为失败。
+
+【Step 3】formatforge 按文档扩展名路由（只调一个）：
+  .docx → validate_docx(docx_path=文档路径)；.tex → validate_latex(latex_path=文档路径)；
+  .md → lint_markdown(markdown_path=文档路径)。
+
+【Step 4】汇总 + 分级（分级表见下）：
+  - 逐 finding 标记 A/B；分级表未列出的规则 ID → B（保守默认）。
+  - 写报告 <workspace_path>/.github/reports/doc-pipeline-T{task_id}-<yyyymmdd>.md
+    （yyyymmdd=当天 UTC 日期；目录不存在则创建）。
+    报告列头（EC-7 固定）：规则ID | A/B | 位置(文件:行) | 证据 | 建议修复 | severity
+    表格后附：① B 类清单及人工处置建议；② Gate D.2 S1-S8 自检摘要表
+    （每条标 通过/需关注 + 一句话证据）。
+  - pm_task_update(触发任务 task_id, notes 追加："doc-pipeline 报告: <报告相对路径>"
+    + A 类/B 类计数摘要)。
+  - git add + commit 仅报告文件（commit message: "docs: doc-pipeline report
+    T-{task_id}"）。流水线对文档只读——git diff 中只允许出现报告文件。
+
+【Step 5】闭环路由：
+  - A 类非空 → pm_task_create(title="doc-fix: <文档名> A类缺陷修复",
+    project=pm_detect_project(workspace_path) 结果，检测不到则沿用触发任务项目,
+    tags=["auto", "doc-fix"],
+    notes 必须含以下两行（各占一行）：
+      报告: .github/reports/doc-pipeline-T{task_id}-<yyyymmdd>.md
+      文档: <文档相对 workspace_path 的路径>
+    + 报告 A 类节选 + 修复约束(只修A类/B类不修/protected region跳过/不新增内容)
+    + re-lint 要求 + KB dataset_id f6b0a969-945f-4ccc-83c2-62f2b687a025)。
+    恰好创建 1 个，不重复创建。
+  - A 类为空（仅 B 类或零 finding）→ 不建子任务；B 类非空则
+    pm_notify(title="doc-pipeline B类待人工", message=报告路径+B类计数, severity=warning)。
+
+====================================================================
+A/B 分级静态表（附录 A 修订版 2026-08-17，已对照 manuscript-lint 实际规则 ID 核实）
+====================================================================
+A 类（机械可验证 → doc-fix 自动修复）：
+  EMD-001（em-dash 标点机械替换）
+  CAN-001（弱化词模板化替换）
+  DN-001（死名词替换）
+  FW-001（模糊展望句改写）
+  WE-001..WE-004（模糊量化词修正）
+  FM-001（不确定度精度机械统一）、FM-002（单位一致性）、FM-005（重复短语删除）
+  CI-001（引用编号不连续 → 编号机械重排）
+  FT-003/FT-004/FT-005（图编号跳号/重复/缺标题）、FT-008/FT-009/FT-010（表格同）
+  FT-011（公式编号连续性）
+  ST-001（标题层级跳级修正）
+B 类（语义判断 → 人工处置 + 飞书通知；**未列出的规则 ID 一律 B**）：
+  Gate D.2 语义规则 S1-S8（wrong ontology/tautology/unowned objects/wrong emphasis/
+  definition-by-reader/metaphor-in-decode/redundant-re-derivation/non-parallel-decodes）
+  plausibility_check（PL-）、contradiction_scan、provenance 引用真实性存疑、术语 unrecognized、
+  statistical_audit（判断型）、WV-001、FM-003/FM-004/FM-006、
+  CI-002/CI-003/CI-004/CI-005、FT-001/FT-002/FT-006/FT-007/FT-012/FT-013、ST-002。
+
+====================================================================
+工具白名单（只准调用这些；其余一律不调）
+====================================================================
+manuscript-lint（list_rules / full_scan 及只读 audit 工具）· citation-lint（只读）·
+formatforge（validate_docx / validate_latex / lint_markdown）·
+project-management（pm_task_update / pm_task_create / pm_notify / pm_detect_project）·
+bash 的 git add / git commit（仅限报告文件）
+
+====================================================================
+哨兵书写规范（PRECONDITION-FAILED）
+====================================================================
+P0 门任一失败 → 不执行 Step 1-5、不建子任务、不改任何文件；
+work_report.json 按以下填法写：
+  notes 第一行 = "PRECONDITION-FAILED: <原因>"（字面量开头，含冒号，原样）
+  files_changed = []；tests = [{"tool":"list_rules","result":"tier1=<n>","passed":false}]
+  round = {round_num}
+审阅者将据此批准（这是流水线的正确终态之一，不是失败）。
