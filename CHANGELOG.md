@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased] — PM #2622
+
+### Added
+- **doc-pipeline & doc-fix prompt templates**（`c6d6e39`/`7b8ff54`/`9b51310`/`d24546c`/`6f1a16f`/`9325f79`）: `.loop/templates/` 双轨镜像 4 个专用模板对（doc_pipeline/doc_fix worker+reviewer，与 project_management `data/loop_templates/templates/` 逐字节一致）；模板 render 回归测试 `tests/test_doc_pipeline_compat.py`（含 loop_kit 兼容性核查：work_report.json 终态保留 / 未知 outcome → resume_failure / max_rounds_exhausted）
+- **兼容性约定**: doc_pipeline/doc_fix 循环由 bridge 侧 `--worker-noop-as-success` 驱动（哨兵终态合法零变更）；PRECONDITION-FAILED 哨兵由 PM 侧 M5 消费
+
 ## v0.4.0 (2026-07-03)
 
 ### Architecture (T-703, T-721, T-722)
