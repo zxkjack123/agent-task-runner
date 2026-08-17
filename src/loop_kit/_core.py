@@ -32,7 +32,7 @@ import time
 import traceback
 import types
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from enum import Enum
 from datetime import UTC, datetime, timedelta
@@ -8663,7 +8663,15 @@ def _load_env_config() -> dict:
     return env_cfg
 
 
-def _enforce_clean_worktree_or_exit(*, allow_dirty: bool) -> None:
+def _enforce_clean_worktree_or_exit(
+    *,
+    allow_dirty: bool,
+    warn_only: bool = False,
+    task_scope: Iterable[str] = (),
+) -> None:
+    # `warn_only` is used ONLY for daemon idle tolerance (PM #2747): a daemon
+    # with a task card on a dirty tree proceeds after warning instead of hard
+    # failing. Explicit-mode invocations keep the hard-fail semantics.
     try:
         dirty = _dirty_tracked_paths()
         if not dirty:
@@ -8674,6 +8682,25 @@ def _enforce_clean_worktree_or_exit(*, allow_dirty: bool) -> None:
             print(f"  - {path}", file=sys.stderr)
         if allow_dirty:
             print("Proceeding because --allow-dirty is set.", file=sys.stderr)
+            return
+        if warn_only:
+            # CT #2 (PM #2747): refuse when dirty tracked paths overlap the
+            # task's declared in-scope files. A lane-merge fail-fast would run
+            # `git reset --hard` on the main worktree (_restore_merge_head_
+            # after_failure) and could wipe unrelated uncommitted changes.
+            scope_set = {str(p).strip() for p in task_scope if str(p).strip()}
+            overlap = sorted(scope_set.intersection(str(p) for p in dirty))
+            if overlap:
+                print(
+                    "Warning: dirty git working tree overlaps task in-scope files"
+                    f" ({', '.join(overlap)}); refusing to start.",
+                    file=sys.stderr,
+                )
+                raise DirtyWorktreeError("Dirty worktree overlaps task scope")
+            print(
+                "Warning: dirty git working tree detected (daemon mode); proceeding.",
+                file=sys.stderr,
+            )
             return
         print("Refusing to start. Re-run with --allow-dirty to bypass.", file=sys.stderr)
         raise DirtyWorktreeError("Dirty worktree")
@@ -12369,6 +12396,8 @@ def cmd_run(
     resume: bool = False,
     reset: bool = False,
     paths: LoopPaths | None = None,
+    *,
+    daemon_mode: bool = False,
 ) -> None:
     resolved_paths = _resolve_paths(paths)
     global _stored_paths
@@ -12385,6 +12414,17 @@ def cmd_run(
                 print(f"Error: {e}", file=sys.stderr)
                 raise StateError(str(e)) from e
         try:
+            # Daemon idle: no task card and not an explicit task invocation →
+            # exit cleanly BEFORE the dirty-worktree check so an idle daemon
+            # never crash-loops on unrelated dirty files (PM #2747).
+            if daemon_mode and not single_round and not Path(config.task_path).exists():
+                _log(f"Idle: no task card at {config.task_path}; exiting cleanly (daemon mode)")
+                print(
+                    f"Idle: no task card found ({config.task_path}); exiting cleanly.",
+                    file=sys.stderr,
+                )
+                return
+
             if reset and not single_round:
                 _reset_bus()
                 _sync_task_card(config.task_path, paths=resolved_paths)
@@ -12395,7 +12435,18 @@ def cmd_run(
             # Single-round subprocesses are spawned by the parent loop which already
             # validated the worktree — skip redundant check to avoid duplicate warnings.
             if not single_round:
-                _enforce_clean_worktree_or_exit(allow_dirty=config.allow_dirty)
+                task_scope: Iterable[str] = ()
+                if daemon_mode:
+                    try:
+                        _, task_card, _ = _load_task_card_or_raise(str(config.task_path))
+                    except (ConfigError, LoopKitError):
+                        task_card = {}
+                    task_scope = task_card.get("in_scope", [])
+                _enforce_clean_worktree_or_exit(
+                    allow_dirty=config.allow_dirty,
+                    warn_only=daemon_mode,
+                    task_scope=task_scope,
+                )
 
             if resume and single_round:
                 print("Error: --resume cannot be combined with --single-round", file=sys.stderr)
@@ -13205,6 +13256,7 @@ def main() -> None:
             env_cfg = _load_env_config()
             # Resolve task path: --task > positional task_ref > config > default
             raw_ref = args.task if args.task is not None else args.task_ref
+            daemon_mode = raw_ref is None
             task_path = _resolve_task_path(raw_ref) or str(resolved_paths.task_card)
 
             def _cfg_val(cli_val, config_key, builtin_default):
@@ -13317,6 +13369,7 @@ def main() -> None:
                 resume=args.resume,
                 reset=args.reset,
                 paths=resolved_paths,
+                daemon_mode=daemon_mode,
             )
     except KeyboardInterrupt:
         sys.exit(EXIT_INTERRUPTED)

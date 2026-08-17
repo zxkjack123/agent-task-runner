@@ -499,6 +499,7 @@ def test_register_backend_allows_custom_backend_in_run_cli(monkeypatch) -> None:
         resume: bool = False,
         reset: bool = False,
         paths: orchestrator.LoopPaths | None = None,
+        daemon_mode: bool = False,
     ) -> None:
         _ = (single_round, round_num, resume, reset)
         captured["worker_backend"] = config.worker_backend
@@ -3636,6 +3637,7 @@ def test_main_run_parses_artifact_timeout(monkeypatch) -> None:
         resume: bool = False,
         reset: bool = False,
         paths: orchestrator.LoopPaths | None = None,
+        daemon_mode: bool = False,
     ) -> None:
         _ = reset
         captured["artifact_timeout"] = config.artifact_timeout
@@ -3679,6 +3681,7 @@ def test_main_run_dispatch_timeout_defaults_to_unlimited(monkeypatch) -> None:
         resume: bool = False,
         reset: bool = False,
         paths: orchestrator.LoopPaths | None = None,
+        daemon_mode: bool = False,
     ) -> None:
         _ = (single_round, round_num, resume, reset)
         captured["dispatch_timeout"] = config.dispatch_timeout
@@ -3703,6 +3706,7 @@ def test_main_run_parses_dispatch_timeout(monkeypatch) -> None:
         resume: bool = False,
         reset: bool = False,
         paths: orchestrator.LoopPaths | None = None,
+        daemon_mode: bool = False,
     ) -> None:
         _ = (single_round, round_num, resume, reset)
         captured["dispatch_timeout"] = config.dispatch_timeout
@@ -3734,6 +3738,7 @@ def test_main_run_parses_dispatch_retry_flags(monkeypatch) -> None:
         resume: bool = False,
         reset: bool = False,
         paths: orchestrator.LoopPaths | None = None,
+        daemon_mode: bool = False,
     ) -> None:
         _ = (single_round, round_num, resume, reset)
         captured["dispatch_retries"] = config.dispatch_retries
@@ -3769,6 +3774,7 @@ def test_main_run_parses_worker_noop_flags(monkeypatch) -> None:
         resume: bool = False,
         reset: bool = False,
         paths: orchestrator.LoopPaths | None = None,
+        daemon_mode: bool = False,
     ) -> None:
         _ = (single_round, round_num, resume, reset)
         captured["worker_noop_as_error"] = config.worker_noop_as_error
@@ -3817,6 +3823,7 @@ def test_main_run_parses_max_session_rounds(monkeypatch) -> None:
         resume: bool = False,
         reset: bool = False,
         paths: orchestrator.LoopPaths | None = None,
+        daemon_mode: bool = False,
     ) -> None:
         _ = (single_round, round_num, resume, reset)
         captured["max_session_rounds"] = config.max_session_rounds
@@ -10015,6 +10022,7 @@ class TestAutoDispatchConfig:
             resume: bool = False,
             reset: bool = False,
             paths: orchestrator.LoopPaths | None = None,
+            daemon_mode: bool = False,
         ) -> None:
             _ = (single_round, round_num, resume, reset)
             captured["auto_dispatch"] = config.auto_dispatch
@@ -10046,6 +10054,7 @@ class TestAutoDispatchConfig:
             resume: bool = False,
             reset: bool = False,
             paths: orchestrator.LoopPaths | None = None,
+            daemon_mode: bool = False,
         ) -> None:
             _ = (single_round, round_num, resume, reset)
             captured["auto_dispatch"] = config.auto_dispatch
@@ -10074,6 +10083,7 @@ class TestAutoDispatchConfig:
             resume: bool = False,
             reset: bool = False,
             paths: orchestrator.LoopPaths | None = None,
+            daemon_mode: bool = False,
         ) -> None:
             _ = (single_round, round_num, resume, reset)
             captured["auto_dispatch"] = config.auto_dispatch
@@ -10166,6 +10176,7 @@ class TestConfigLoadingPrecedence:
             resume: bool = False,
             reset: bool = False,
             paths: orchestrator.LoopPaths | None = None,
+            daemon_mode: bool = False,
         ) -> None:
             _ = (single_round, round_num, resume, reset)
             captured["max_rounds"] = config.max_rounds
@@ -10198,6 +10209,7 @@ class TestConfigLoadingPrecedence:
             resume: bool = False,
             reset: bool = False,
             paths: orchestrator.LoopPaths | None = None,
+            daemon_mode: bool = False,
         ) -> None:
             _ = (single_round, round_num, resume, reset)
             captured["max_rounds"] = config.max_rounds
@@ -10296,6 +10308,7 @@ class TestResetDefault:
             resume: bool = False,
             reset: bool = False,
             paths: orchestrator.LoopPaths | None = None,
+            daemon_mode: bool = False,
         ) -> None:
             _ = (config, single_round, round_num, resume)
             captured["reset"] = reset
@@ -10324,6 +10337,7 @@ class TestResetDefault:
             resume: bool = False,
             reset: bool = False,
             paths: orchestrator.LoopPaths | None = None,
+            daemon_mode: bool = False,
         ) -> None:
             _ = (config, single_round, round_num, resume)
             captured["reset"] = reset
@@ -13423,3 +13437,123 @@ class TestFailWithStateOutcomes:
 
     def test_interrupted_writes_summary(self, tmp_path, monkeypatch):
         self._fail_and_check_outcome(tmp_path, monkeypatch, "interrupted", "ctrl-c")
+
+
+class TestDaemonIdle:
+    """PM #2747: daemon idle crash-restart fix."""
+
+    def test_daemon_idle_no_card_exits_cleanly(self, tmp_path: Path, monkeypatch, capsys) -> None:
+        _configure_loop_paths(monkeypatch, tmp_path)
+        card = tmp_path / ".loop" / "task_card.json"
+        assert not card.exists()
+        orchestrator.cmd_run(
+            _run_config(str(card)),
+            single_round=False,
+            round_num=None,
+            daemon_mode=True,
+        )  # must return normally, no SystemExit
+        captured = capsys.readouterr()
+        assert "Idle: no task card" in captured.err
+
+    def test_daemon_idle_precedes_dirty_check(self, tmp_path: Path, monkeypatch) -> None:
+        _configure_loop_paths(monkeypatch, tmp_path)
+        card = tmp_path / ".loop" / "task_card.json"
+        calls: dict[str, int] = {"dirty_check": 0}
+
+        def spy_dirty():
+            calls["dirty_check"] += 1
+            return ["src/foo.py"]
+
+        monkeypatch.setattr(orchestrator, "_dirty_tracked_paths", spy_dirty)
+        # idle 检测在 dirty check 之前 → 脏树不应触发 exit 4
+        orchestrator.cmd_run(
+            _run_config(str(card)),
+            single_round=False,
+            round_num=None,
+            daemon_mode=True,
+        )
+        assert calls["dirty_check"] == 0
+
+    def test_daemon_with_card_dirty_tree_warns_and_proceeds(self, tmp_path: Path, monkeypatch, capsys) -> None:
+        _configure_loop_paths(monkeypatch, tmp_path)
+        card = tmp_path / ".loop" / "task_card.json"
+        card.write_text(json.dumps({"task_id": "T-1", "goal": "g"}), encoding="utf-8")
+        monkeypatch.setattr(orchestrator, "_dirty_tracked_paths", lambda: ["src/foo.py"])
+        called: dict[str, object] = {}
+        monkeypatch.setattr(
+            orchestrator,
+            "_main_loop",
+            lambda **kwargs: called.update(kwargs),
+        )
+        orchestrator.cmd_run(
+            _run_config(str(card)),
+            single_round=False,
+            round_num=None,
+            daemon_mode=True,
+        )
+        assert "config" in called
+        captured = capsys.readouterr()
+        assert "proceeding" in captured.err.lower()
+
+    def test_daemon_with_card_dirty_overlap_refuses(self, tmp_path: Path, monkeypatch, capsys) -> None:
+        """CT #2: dirty tracked paths overlapping the card's in_scope must refuse."""
+        _configure_loop_paths(monkeypatch, tmp_path)
+        card = tmp_path / ".loop" / "task_card.json"
+        card.write_text(
+            json.dumps({"task_id": "T-1", "goal": "g", "in_scope": ["src/foo.py"]}),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(orchestrator, "_dirty_tracked_paths", lambda: ["src/foo.py"])
+        with pytest.raises(SystemExit) as exc:
+            orchestrator.cmd_run(
+                _run_config(str(card)),
+                single_round=False,
+                round_num=None,
+                daemon_mode=True,
+            )
+        assert exc.value.code == orchestrator.EXIT_DIRTY_WORKTREE
+        assert "overlaps task in-scope files" in capsys.readouterr().err
+
+    def test_explicit_mode_missing_card_still_exits_1(self, tmp_path: Path, monkeypatch) -> None:
+        _configure_loop_paths(monkeypatch, tmp_path)
+        card = tmp_path / "missing.json"
+        monkeypatch.setattr(orchestrator, "_dirty_tracked_paths", lambda: [])
+        with pytest.raises(SystemExit) as exc:
+            orchestrator.cmd_run(
+                _run_config(str(card)),
+                single_round=False,
+                round_num=None,
+                daemon_mode=False,
+            )
+        assert exc.value.code == orchestrator.EXIT_GENERAL_ERROR
+
+    def test_explicit_mode_dirty_tree_still_exits_4(self, tmp_path: Path, monkeypatch) -> None:
+        _configure_loop_paths(monkeypatch, tmp_path)
+        card = tmp_path / ".loop" / "task_card.json"
+        card.write_text(json.dumps({"task_id": "T-1", "goal": "g"}), encoding="utf-8")
+        monkeypatch.setattr(orchestrator, "_dirty_tracked_paths", lambda: ["src/foo.py"])
+        with pytest.raises(SystemExit) as exc:
+            orchestrator.cmd_run(
+                _run_config(str(card)),
+                single_round=False,
+                round_num=None,
+                daemon_mode=False,
+            )
+        assert exc.value.code == orchestrator.EXIT_DIRTY_WORKTREE
+
+    def test_enforce_clean_worktree_warn_only(self, monkeypatch, capsys) -> None:
+        monkeypatch.setattr(orchestrator, "_dirty_tracked_paths", lambda: ["src/foo.py"])
+        orchestrator._enforce_clean_worktree_or_exit(allow_dirty=False, warn_only=True)
+        captured = capsys.readouterr()
+        assert "proceeding" in captured.err.lower()
+
+    def test_enforce_clean_worktree_warn_only_scope_overlap(self, monkeypatch, capsys) -> None:
+        monkeypatch.setattr(orchestrator, "_dirty_tracked_paths", lambda: ["src/foo.py"])
+        with pytest.raises(SystemExit) as exc:
+            orchestrator._enforce_clean_worktree_or_exit(
+                allow_dirty=False,
+                warn_only=True,
+                task_scope=["src/foo.py"],
+            )
+        assert exc.value.code == orchestrator.EXIT_DIRTY_WORKTREE
+        assert "overlaps task in-scope files" in capsys.readouterr().err

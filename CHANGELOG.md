@@ -124,3 +124,10 @@
 - **pytest addopts**: default `pytest` run excludes e2e (`-m "not e2e"`); CI (`loop-ci.yml`) synced accordingly. Run e2e explicitly with `pytest -m e2e`.
 - **`_persist_knowledge_updates` fix**: reviewer knowledge pattern persistence no longer crashes on `_normalize_pattern_entry` signature mismatch.
 - Independent acceptance: PASS (0 blocking defects) — 3 consecutive full pytest runs left HEAD pinned at `36a5bcf`; e2e 3 passed (~500s); commits `36a5bcf` `2723361` `9d1d6db` `995c7e8` `3eb7193` (+ revert pair `f6bc215`→`05e3801` retained for audit).
+
+### Daemon Idle Crash-Restart Fix (PM #2747, 2026-08-17)
+- **Idle clean exit**: daemon-mode invocations (no `--task` / no `task_ref`) with no task card now exit cleanly (exit 0) BEFORE the dirty-worktree check, ending the 30s crash-restart loop on unrelated dirty files.
+- **Dirty-tree downgrade in daemon mode**: `_enforce_clean_worktree_or_exit` gained `warn_only` — daemon mode warns and proceeds instead of hard-failing; explicit-mode invocations keep exit 4 semantics.
+- **Task-scope overlap guard**: daemon mode refuses (exit 4) when dirty tracked paths overlap the task card's `in_scope` — prevents lane-merge fail-fast `git reset --hard` from wiping unrelated uncommitted changes.
+- **systemd unit**: `Restart=always` → `Restart=on-failure` (exit 0 no longer restarts; real failures keep 30s retry). Timer untouched; task pickup cadence changes from crash-loop 30s to timer 5min.
+- Tests: `TestDaemonIdle` (8 cases) covering idle exit 0, dirty-check precedence, warn-only downgrade, scope-overlap refusal, and explicit-mode regressions.

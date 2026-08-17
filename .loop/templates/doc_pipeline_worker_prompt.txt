@@ -76,7 +76,8 @@ Execute the contract below and only finish after writing {work_report_path}.
   - A 类非空 → pm_task_create(title="doc-fix: <文档名> A类缺陷修复",
     project=pm_detect_project(workspace_path) 结果，检测不到则沿用触发任务项目,
     tags=["auto", "doc-fix"],
-    notes 必须含以下两行（各占一行）：
+    notes 必须含以下三行（各占一行）：
+      workspace: <workspace_path 绝对路径>
       报告: .github/reports/doc-pipeline-T{task_id}-<yyyymmdd>.md
       文档: <文档相对 workspace_path 的路径>
     + 报告 A 类节选 + 修复约束(只修A类/B类不修/protected region跳过/不新增内容)
