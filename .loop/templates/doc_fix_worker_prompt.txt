@@ -50,8 +50,8 @@ Execute the contract below and only finish after writing {work_report_path}.
      （URL/数学/代码块/引用块/HTML 注释/参考文献条目）而无法修复 →
      不做任何文件修改，work_report.json 按哨兵填法写：
      notes 第一行 = "PRECONDITION-FAILED: 全部 A 类项位于 protected region，无可自动修复项"
-     files_changed = []；tests = [{"tool":"protected_region_scan",
-     "result":"all-A-protected","passed":false}]
+     files_changed = []；tests = [{{"tool":"protected_region_scan",
+     "result":"all-A-protected","passed":false}}]
   4. 每条修复必须对应报告中的一行（规则ID+行号）；修复前先读该行上下文。
 
 【re-lint 要求（每条修复都要）】

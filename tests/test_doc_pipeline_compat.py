@@ -105,3 +105,30 @@ def test_e_stale_cleanup_is_the_only_work_report_unlinker():
     handler_src = inspect.getsource(_core._terminal_outcome_handle_resume_failure)
     assert "_clean_stale_loop_state" not in handler_src
     assert call_sites, "expected at least one stale-path call site (sanity of inspection)"
+
+
+def test_f_all_doc_templates_render_with_loop_kit_context():
+    """Regression: doc templates must not contain unescaped literal braces —
+    _render_prompt_template uses str.format and raises KeyError on stray {."""
+    from pathlib import Path as _Path
+
+    ctx = {
+        "task_id": "T-1", "round_num": 1, "run_id": "run-x",
+        "work_report_path": "/tmp/w.json", "review_report_path": "/tmp/r.json",
+        "agents_md": "-", "role_md": "-", "task_card_section": "-",
+        "prior_context_section": "-", "handoff_section": "-",
+        "orchestrator_path": "-", "function_index": "-",
+        "quickstart_section": "-", "knowledge_section": "-",
+        "task_packet_section": "-",
+    }
+    tmpl_dir = _Path(__file__).resolve().parent.parent / ".loop" / "templates"
+    for name in [
+        "doc_pipeline_worker_prompt.txt",
+        "doc_pipeline_reviewer_prompt.txt",
+        "doc_fix_worker_prompt.txt",
+        "doc_fix_reviewer_prompt.txt",
+    ]:
+        p = tmpl_dir / name
+        assert p.exists(), f"missing template {name}"
+        out = _core._render_prompt_template(template_path=p, context=ctx)
+        assert "T-1" in out  # placeholders resolved
