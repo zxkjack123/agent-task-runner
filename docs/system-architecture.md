@@ -121,6 +121,19 @@
 | ATR Dispatch | `agent-task-runner/src/loop_kit/dispatch.py` |
 | ATR State Machine | `agent-task-runner/src/loop_kit/state.py` |
 
+## Layered Pipeline (fit-review → execute → accept → close)
+
+**归属声明(必读)**: 该分层管线由 **copilot-agents 侧 `pm-task-closed-loop` skill 编排**,并非 `src/loop_kit/state.py` 实现。ATR 核心循环(state 4 态: idle/awaiting_work/awaiting_review/done)仅对应本流中的 **execute** 段;fit-review 是 loop 前置,accept/close 是 loop 后置。三者为可插拔阶段,不改变现有 worker↔reviewer 核心循环。
+
+- **T1 轻量(默认)**: 适配审查(task-fit-reviewer)→ 执行(ATR worker/reviewer 循环)→ 独立验收(acceptance-verifier)→ 收尾(closer)
+- **T2 标准**: + plan-architect 计划
+- **T3 重型**: + critical-thinking 挑战 + 人工审批点(触发含: 不可逆操作、高风险面、验收失败 1 次自动升级、外部事实断言密集)
+
+**不变底线**: 前置适配审查 / 执行与验收独立性分离(+外部真相交叉验证 + 修复后复验)/ 收尾闭环。
+**护栏**: 验收独立+外部交叉验证 / commit-relative 验证 / 外部事实断言附证据或待验证标记 / .loop 工件衔接 / 计划验收命令自推演。
+
+角色文档: `docs/roles/task-fit-reviewer.md`、`docs/roles/acceptance-verifier.md`、`docs/roles/closer.md`(输出契约均为编排侧产物,非 loop_kit dispatch 工件)。
+
 ## 相关文档
 
 - [ATR Integration Spec](integration-spec.md) — AOM 集成规范
