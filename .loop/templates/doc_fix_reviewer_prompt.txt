@@ -26,6 +26,11 @@ Execute the contract below and only finish after writing {review_report_path}.
    且 passed=true（findings_count=0 或该行不再命中）；缺证据 → 视为未修复。
 3. 【无越界】对照报告：B 类项未动、A 类项逐条有对应 diff 或明确跳过说明
    （跳过仅限 protected region）。
+3b. 【全跳过升级】A 类清单非空而 worker diff 为空（全部跳过）→
+   decision=changes_required：A 类按定义应可机械修复；全跳过说明保护纪律
+   冲突（或 worker 无从下手），必须升级人工。跳过仅允许部分跳过
+   （其余条目有对应 diff），且每条跳过须附 protected-region 证据
+   （文件:行 + 该行属 URL/数学/代码块/引用块的判定）。
 4. 【语义自检摘要】work_report.notes 含 Gate D.2 S1-S8 修复后自检结论
    （8 条逐条有结论）。
 5. 【commit 纪律】commit message 合规；无与修复无关的文件被 commit。
