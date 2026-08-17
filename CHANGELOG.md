@@ -131,3 +131,8 @@
 - **Task-scope overlap guard**: daemon mode refuses (exit 4) when dirty tracked paths overlap the task card's `in_scope` — prevents lane-merge fail-fast `git reset --hard` from wiping unrelated uncommitted changes.
 - **systemd unit**: `Restart=always` → `Restart=on-failure` (exit 0 no longer restarts; real failures keep 30s retry). Timer untouched; task pickup cadence changes from crash-loop 30s to timer 5min.
 - Tests: `TestDaemonIdle` (8 cases) covering idle exit 0, dirty-check precedence, warn-only downgrade, scope-overlap refusal, and explicit-mode regressions.
+
+### Pre-Existing Test Failure Fix (PM #2748, 2026-08-17)
+- **Relative-date freshness samples**: hardcoded future-dated fresh sample (`"last_verified": "2026-04-01T12:00:00Z"`) — a time bomb that expired past the 30-day stale threshold — replaced with runtime-computed relative date (`now(UTC) - 5 days`). Also neutralized the analogous `"source_version": "2026-04-01"` latent hazard. Eliminates the `TestCmdStatus::test_shows_context_file_stats` time bomb with zero new dependencies.
+- **Suite-wide path-global isolation**: new `tests/conftest.py` adds a suite-level autouse fixture that snapshots/restores the 8 module globals mutated by 14 direct calls to production `orchestrator._configure_loop_paths()` (from `test_integration.py` and `test_pm_integration.py`), preventing test-order-dependent pollution from breaking `TestResetDefault::test_task_card_in_resettable_files`.
+- Result: full `pytest -m "not e2e"` → **614 passed, 1 skipped, 3 deselected, 0 failed** (4 consistent full runs); both previously-failing tests pass in isolation. Commit `768ffb1` (tests only).
