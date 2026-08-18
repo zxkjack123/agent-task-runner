@@ -1,7 +1,6 @@
 """Tests for PM integration improvements (Phase 1-5 of P0-P3 plan)."""
 
 import json
-from datetime import UTC
 from pathlib import Path
 
 import pytest
@@ -211,21 +210,34 @@ class TestKnowledgeExtraction:
     def test_persist_knowledge_updates(self, tmp_path: Path, monkeypatch) -> None:
         _setup_loop_dir(monkeypatch, tmp_path)
         monkeypatch.setattr(orchestrator, "_is_git_repo_root", lambda _: False)
-        from datetime import datetime
-
-        now = datetime.now(tz=UTC)
         monkeypatch.setattr(orchestrator._normalize_pattern_entry,
                            "__defaults__", None)
         # Mock _normalize_pattern_entry to accept simpler args
-        orig = orchestrator._normalize_pattern_entry
 
         def mock_normalize(entry, *, now_utc=None, source_version=""):
-            return ({"pattern": str(entry.get("pattern", "")), "category": str(entry.get("category", "auto")), "confidence": 0.5, "last_verified": "2025-01-01T00:00:00Z"}, True, False)
+            return (
+                {
+                    "pattern": str(entry.get("pattern", "")),
+                    "category": str(entry.get("category", "auto")),
+                    "confidence": 0.5,
+                    "last_verified": "2025-01-01T00:00:00Z",
+                },
+                True,
+                False,
+            )
         monkeypatch.setattr(orchestrator, "_normalize_pattern_entry", mock_normalize)
-        monkeypatch.setattr(orchestrator, "_sync_knowledge_sqlite_index", lambda **kw: {"row_count": 1, "deduped": 0, "fts_available": False})
+        monkeypatch.setattr(
+            orchestrator,
+            "_sync_knowledge_sqlite_index",
+            lambda **kw: {"row_count": 1, "deduped": 0, "fts_available": False},
+        )
         monkeypatch.setattr(orchestrator, "_dedupe_pattern_entries", lambda entries: entries)
         monkeypatch.setattr(orchestrator, "_write_patterns_jsonl", lambda entries, paths=None: None)
-        monkeypatch.setattr(orchestrator, "_sync_knowledge_sqlite_index", lambda **kw: {"row_count": 1, "deduped": 0, "fts_available": False})
+        monkeypatch.setattr(
+            orchestrator,
+            "_sync_knowledge_sqlite_index",
+            lambda **kw: {"row_count": 1, "deduped": 0, "fts_available": False},
+        )
         updates = {
             "pitfalls": ["Test pitfall: always validate input"],
             "patterns": ["Test pattern: use context managers"],
@@ -271,7 +283,8 @@ class TestATRFullChain:
     def test_write_round_summary_fields(self, tmp_path, monkeypatch):
         """_write_round_summary writes all expected outcome fields."""
         import loop_kit.orchestrator as orch
-        ld = tmp_path / ".loop"; ld.mkdir(parents=True)
+        ld = tmp_path / ".loop"
+        ld.mkdir(parents=True)
         monkeypatch.setattr(orch, "_LOOP_DIR", ld)
         orch._configure_loop_paths(ld)
         paths = orch._resolve_paths()
@@ -295,7 +308,8 @@ class TestATRFullChain:
     def test_emit_event_produces_events_jsonl(self, tmp_path, monkeypatch):
         """_emit_event writes JSONL lines to events.jsonl."""
         import loop_kit.orchestrator as orch
-        ld = tmp_path / ".loop"; ld.mkdir(parents=True)
+        ld = tmp_path / ".loop"
+        ld.mkdir(parents=True)
         monkeypatch.setattr(orch, "_LOOP_DIR", ld)
         orch._configure_loop_paths(ld)
         paths = orch._resolve_paths()
