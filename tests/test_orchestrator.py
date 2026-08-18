@@ -59,7 +59,6 @@ def _set_logs_dir(tmp_path: Path, logs_dir: Path | None = None) -> LoopPaths:
     return paths
 
 
-
 @pytest.fixture(autouse=True)
 def _isolate_orchestrator_path_globals() -> None:
     original_root = orchestrator.ROOT
@@ -440,7 +439,14 @@ def test_main_init_creates_prompt_templates_in_loop_dir(tmp_path: Path, monkeypa
 def test_main_status_dependency_map_flag_dispatches_to_cmd_status(monkeypatch) -> None:
     captured: dict[str, bool] = {}
 
-    def fake_status(*, tree: bool = False, dependency_map: bool = False, paths=None, json_output: bool = False, outcome_only: bool = False) -> None:
+    def fake_status(
+        *,
+        tree: bool = False,
+        dependency_map: bool = False,
+        paths=None,
+        json_output: bool = False,
+        outcome_only: bool = False,
+    ) -> None:
         _ = (tree, dependency_map, json_output, outcome_only)
         _ = paths
         captured["tree"] = tree
@@ -1321,9 +1327,7 @@ class TestSessionManager:
 
         assert changed is True
         assert manager.get_session(state, "codex") == "sid-1"
-        assert state["sessions"] == {
-            "worker": {"session_id": "sid-1", "backend": "codex", "started_round": 2}
-        }
+        assert state["sessions"] == {"worker": {"session_id": "sid-1", "backend": "codex", "started_round": 2}}
 
     def test_store_session_preserves_started_round_when_session_unchanged(self) -> None:
         manager = orchestrator.SessionManager(role="worker")
@@ -1334,9 +1338,7 @@ class TestSessionManager:
         changed = manager.store_session(state, "codex", "sid-1", round_num=4)
 
         assert changed is False
-        assert state["sessions"] == {
-            "worker": {"session_id": "sid-1", "backend": "codex", "started_round": 2}
-        }
+        assert state["sessions"] == {"worker": {"session_id": "sid-1", "backend": "codex", "started_round": 2}}
 
     def test_store_session_sets_started_round_when_existing_entry_is_missing_it(self) -> None:
         manager = orchestrator.SessionManager(role="worker")
@@ -1347,9 +1349,7 @@ class TestSessionManager:
         changed = manager.store_session(state, "codex", "sid-1", round_num=4)
 
         assert changed is True
-        assert state["sessions"] == {
-            "worker": {"session_id": "sid-1", "backend": "codex", "started_round": 4}
-        }
+        assert state["sessions"] == {"worker": {"session_id": "sid-1", "backend": "codex", "started_round": 4}}
 
     def test_get_session_returns_none_on_backend_mismatch(self) -> None:
         manager = orchestrator.SessionManager(role="worker")
@@ -1847,9 +1847,7 @@ def test_auto_dispatch_role_keeps_session_before_rotation_boundary(tmp_path: Pat
     assert resume_events[0]["status"] == "resume_hit"
 
 
-def test_auto_dispatch_role_rotates_missing_started_round_when_rotation_enabled(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_auto_dispatch_role_rotates_missing_started_round_when_rotation_enabled(tmp_path: Path, monkeypatch) -> None:
     _configure_loop_paths(monkeypatch, tmp_path)
     state = {
         "state": orchestrator.STATE_AWAITING_WORK,
@@ -3966,11 +3964,7 @@ class TestKnowledgeCli:
         orchestrator.main()
         out = capsys.readouterr().out
         assert "Added pattern" in out
-        entries = [
-            json.loads(line)
-            for line in patterns_path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
+        entries = [json.loads(line) for line in patterns_path.read_text(encoding="utf-8").splitlines() if line.strip()]
         assert len(entries) == 2
         new_entry = entries[-1]
         assert new_entry["pattern"] == "new pattern"
@@ -3979,9 +3973,7 @@ class TestKnowledgeCli:
         assert new_entry["source"] == "review"
         assert isinstance(new_entry["source_version"], str) and new_entry["source_version"]
 
-    def test_knowledge_prune_removes_entries_with_old_source_version(
-        self, tmp_path: Path, monkeypatch, capsys
-    ) -> None:
+    def test_knowledge_prune_removes_entries_with_old_source_version(self, tmp_path: Path, monkeypatch, capsys) -> None:
         facts_path, pitfalls_path, patterns_path = _configure_default_knowledge_paths(monkeypatch, tmp_path)
         now = datetime.now(UTC)
         old_iso = (now - timedelta(days=40)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -4871,16 +4863,18 @@ def test_single_round_no_change_default_is_validation_failure(tmp_path: Path, mo
     monkeypatch.setattr(
         orchestrator,
         "_wait_for_file",
-        lambda path, description, **kwargs: {
-            "task_id": "T-604",
-            "round": 1,
-            "head_sha": "head-ref",
-            "files_changed": [],
-            "tests": [],
-            "notes": "noop",
-        }
-        if path == orchestrator.WORK_REPORT
-        else None,
+        lambda path, description, **kwargs: (
+            {
+                "task_id": "T-604",
+                "round": 1,
+                "head_sha": "head-ref",
+                "files_changed": [],
+                "tests": [],
+                "notes": "noop",
+            }
+            if path == orchestrator.WORK_REPORT
+            else None
+        ),
     )
     monkeypatch.setattr(orchestrator, "_is_git_repo_root", lambda _path: True)
     monkeypatch.setattr(
@@ -4928,16 +4922,18 @@ def test_single_round_invalid_head_ref_window_is_validation_failure(tmp_path: Pa
     monkeypatch.setattr(
         orchestrator,
         "_wait_for_file",
-        lambda path, description, **kwargs: {
-            "task_id": "T-604",
-            "round": 1,
-            "head_sha": "missing-ref",
-            "files_changed": ["x.py"],
-            "tests": [],
-            "notes": "invalid ref",
-        }
-        if path == orchestrator.WORK_REPORT
-        else None,
+        lambda path, description, **kwargs: (
+            {
+                "task_id": "T-604",
+                "round": 1,
+                "head_sha": "missing-ref",
+                "files_changed": ["x.py"],
+                "tests": [],
+                "notes": "invalid ref",
+            }
+            if path == orchestrator.WORK_REPORT
+            else None
+        ),
     )
     monkeypatch.setattr(orchestrator, "_is_git_repo_root", lambda _path: True)
 
@@ -6030,15 +6026,17 @@ def test_single_round_lane_dispatch_emits_lane_runtime_telemetry_and_report_fiel
     monkeypatch.setattr(
         orchestrator,
         "_auto_dispatch_role",
-        lambda **kwargs: {
-            "task_id": "T-731",
-            "round": 1,
-            "decision": "approve",
-            "blocking_issues": [],
-            "non_blocking_suggestions": [],
-        }
-        if kwargs.get("role") == "reviewer"
-        else None,
+        lambda **kwargs: (
+            {
+                "task_id": "T-731",
+                "round": 1,
+                "decision": "approve",
+                "blocking_issues": [],
+                "non_blocking_suggestions": [],
+            }
+            if kwargs.get("role") == "reviewer"
+            else None
+        ),
     )
     monkeypatch.setattr(orchestrator, "_diff", lambda base, head: f"diff {base}->{head}")
     monkeypatch.setattr(orchestrator, "_log_oneline", lambda base, head: f"log {base}->{head}")
@@ -6322,9 +6320,7 @@ def test_single_round_lane_review_parallel_one_reject_blocks_integration(tmp_pat
     assert "__integration__" not in state["lanes"]
 
 
-def test_single_round_lane_review_future_failure_retains_exception_diagnostics(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_single_round_lane_review_future_failure_retains_exception_diagnostics(tmp_path: Path, monkeypatch) -> None:
     _configure_loop_paths(monkeypatch, tmp_path)
 
     task_path = tmp_path / "task_input.json"
@@ -6530,15 +6526,17 @@ def test_lane_review_parallel_dispatch_uses_lane_local_review_request_artifact(t
     monkeypatch.setattr(
         orchestrator,
         "_auto_dispatch_role",
-        lambda **kwargs: {
-            "task_id": "T-734",
-            "round": 1,
-            "decision": "approve",
-            "blocking_issues": [],
-            "non_blocking_suggestions": [],
-        }
-        if kwargs.get("role") == "reviewer"
-        else None,
+        lambda **kwargs: (
+            {
+                "task_id": "T-734",
+                "round": 1,
+                "decision": "approve",
+                "blocking_issues": [],
+                "non_blocking_suggestions": [],
+            }
+            if kwargs.get("role") == "reviewer"
+            else None
+        ),
     )
 
     orchestrator.cmd_run(
@@ -7090,9 +7088,7 @@ def test_outer_loop_propagates_worker_noop_as_success_flag(tmp_path: Path, monke
     assert "--worker-noop-as-error" not in cmd
 
 
-def test_outer_loop_propagates_worker_noop_as_error_flag_even_with_env_override(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_outer_loop_propagates_worker_noop_as_error_flag_even_with_env_override(tmp_path: Path, monkeypatch) -> None:
     _configure_loop_paths(monkeypatch, tmp_path)
 
     task_path = tmp_path / "task_input.json"
@@ -9067,9 +9063,7 @@ class TestCmdReport:
         assert "## Changed Files" in out
         assert "- r1: a.py, b.py" in out
 
-    def test_report_includes_lane_runtime_summary_and_statuses(
-        self, tmp_path: Path, monkeypatch, capsys
-    ) -> None:
+    def test_report_includes_lane_runtime_summary_and_statuses(self, tmp_path: Path, monkeypatch, capsys) -> None:
         _configure_loop_paths(monkeypatch, tmp_path)
         orchestrator.TASK_CARD.write_text(
             json.dumps({"task_id": "T-710", "goal": "Lane runtime report"}, ensure_ascii=False) + "\n",
@@ -10263,9 +10257,7 @@ class TestConfigLoadingPrecedence:
         assert exc.value.code == orchestrator.EXIT_VALIDATION_ERROR
         assert "dispatch_timeout must be >= 0" in capsys.readouterr().err
 
-    def test_main_run_rejects_invalid_backend_preference_from_config(
-        self, tmp_path: Path, monkeypatch, capsys
-    ) -> None:
+    def test_main_run_rejects_invalid_backend_preference_from_config(self, tmp_path: Path, monkeypatch, capsys) -> None:
         _configure_loop_paths(monkeypatch, tmp_path)
         config_path = tmp_path / ".loop" / "config.json"
         config_path.write_text('{"backend_preference": 9}', encoding="utf-8")
@@ -12089,7 +12081,9 @@ def test_path_helpers_use_explicit_paths_instead_of_global_path_constants(tmp_pa
 
     _set_logs_dir(tmp_path, logs_dir=tmp_path / ".loop-global-logs")
 
-    assert orchestrator._dispatch_log_path("worker", paths=explicit_paths) == explicit_paths.logs / "worker_dispatch.log"
+    assert (
+        orchestrator._dispatch_log_path("worker", paths=explicit_paths) == explicit_paths.logs / "worker_dispatch.log"
+    )
     assert orchestrator._feed_log_path(paths=explicit_paths) == explicit_paths.logs / "feed.jsonl"
     assert (
         orchestrator._feed_quarantine_log_path(paths=explicit_paths)
@@ -12133,9 +12127,7 @@ def test_migrated_path_helpers_reject_direct_global_path_reads() -> None:
         if not isinstance(node, ast.FunctionDef) or node.name not in target_functions:
             continue
         loaded_names = {
-            name.id
-            for name in ast.walk(node)
-            if isinstance(name, ast.Name) and isinstance(name.ctx, ast.Load)
+            name.id for name in ast.walk(node) if isinstance(name, ast.Name) and isinstance(name.ctx, ast.Load)
         }
         direct_globals = sorted(name for name in loaded_names if name in forbidden_globals)
         if direct_globals:
@@ -12212,7 +12204,10 @@ class TestKnowledgeQueryTokensT724:
             {
                 "goal": "whatever",
                 "lanes": [
-                    {"lane_id": "lane_core", "owner_paths": ["src/loop_kit/orchestrator.py", "tests/test_orchestrator.py"]}
+                    {
+                        "lane_id": "lane_core",
+                        "owner_paths": ["src/loop_kit/orchestrator.py", "tests/test_orchestrator.py"],
+                    }
                 ],
             },
         )
@@ -12323,9 +12318,7 @@ class TestKnowledgeBudgetT724:
         assert token_count <= 55  # allow small margin for section headers
         assert "truncated" in section
 
-    def test_render_knowledge_section_no_truncation_when_under_budget(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
+    def test_render_knowledge_section_no_truncation_when_under_budget(self, tmp_path: Path, monkeypatch) -> None:
         _configure_loop_paths(monkeypatch, tmp_path)
         monkeypatch.setattr(orchestrator, "_KNOWLEDGE_RETRIEVAL_FACT_CAP", 1)
         monkeypatch.setattr(orchestrator, "_KNOWLEDGE_RETRIEVAL_PITFALL_CAP", 1)
@@ -12666,9 +12659,14 @@ class TestRoundOutcomeEnum:
     def test_all_members_present(self) -> None:
         members = {m.name for m in orchestrator._RoundOutcome}
         assert members == {
-            "APPROVED", "CHANGES_REQUIRED", "NO_CHANGE_SUCCESS",
-            "WORKER_TIMEOUT", "REVIEWER_TIMEOUT", "MAX_ROUNDS_EXHAUSTED",
-            "TERMINAL_ERROR", "INVALID_TRANSITION",
+            "APPROVED",
+            "CHANGES_REQUIRED",
+            "NO_CHANGE_SUCCESS",
+            "WORKER_TIMEOUT",
+            "REVIEWER_TIMEOUT",
+            "MAX_ROUNDS_EXHAUSTED",
+            "TERMINAL_ERROR",
+            "INVALID_TRANSITION",
         }
 
 
@@ -12755,10 +12753,15 @@ class TestTerminalOutcomeHandlers:
     """Test _TERMINAL_OUTCOME_HANDLERS coverage."""
 
     def test_approved_maps_to_resume_success(self) -> None:
-        assert orchestrator._TERMINAL_OUTCOME_HANDLERS["approved"] is orchestrator._terminal_outcome_handle_resume_success
+        assert (
+            orchestrator._TERMINAL_OUTCOME_HANDLERS["approved"] is orchestrator._terminal_outcome_handle_resume_success
+        )
 
     def test_no_change_success_maps_to_resume_success(self) -> None:
-        assert orchestrator._TERMINAL_OUTCOME_HANDLERS["no_change_success"] is orchestrator._terminal_outcome_handle_resume_success
+        assert (
+            orchestrator._TERMINAL_OUTCOME_HANDLERS["no_change_success"]
+            is orchestrator._terminal_outcome_handle_resume_success
+        )
 
     def test_terminal_error_maps_to_error_handler(self) -> None:
         assert orchestrator._TERMINAL_OUTCOME_HANDLERS["terminal_error"] is orchestrator._terminal_outcome_handle_error
@@ -12793,13 +12796,22 @@ class TestSingleRoundPhaseHandlers:
     """Test _SINGLE_ROUND_PHASE_HANDLERS coverage."""
 
     def test_reviewer_approve_handler(self) -> None:
-        assert orchestrator._SINGLE_ROUND_PHASE_HANDLERS[("reviewer", "approve")] is orchestrator._single_round_handle_review_approved
+        assert (
+            orchestrator._SINGLE_ROUND_PHASE_HANDLERS[("reviewer", "approve")]
+            is orchestrator._single_round_handle_review_approved
+        )
 
     def test_reviewer_changes_required_handler(self) -> None:
-        assert orchestrator._SINGLE_ROUND_PHASE_HANDLERS[("reviewer", "changes_required")] is orchestrator._single_round_handle_changes_required
+        assert (
+            orchestrator._SINGLE_ROUND_PHASE_HANDLERS[("reviewer", "changes_required")]
+            is orchestrator._single_round_handle_changes_required
+        )
 
     def test_worker_no_change_handler(self) -> None:
-        assert orchestrator._SINGLE_ROUND_PHASE_HANDLERS[("worker", "no_change_success")] is orchestrator._single_round_handle_worker_noop
+        assert (
+            orchestrator._SINGLE_ROUND_PHASE_HANDLERS[("worker", "no_change_success")]
+            is orchestrator._single_round_handle_worker_noop
+        )
 
     def test_dispatch_reviewer_approve(self) -> None:
         handler = orchestrator._dispatch_single_round_phase("reviewer", "approve")
@@ -12838,9 +12850,7 @@ class TestStateDescriptorHandlerField:
 class TestKnowledgeGovernanceT704:
     """Tests for knowledge governance: auto-prune, stale detection, dedup during sync."""
 
-    def test_auto_prune_during_sync_removes_stale_entries(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
+    def test_auto_prune_during_sync_removes_stale_entries(self, tmp_path: Path, monkeypatch) -> None:
         facts_path, pitfalls_path, patterns_path = _configure_default_knowledge_paths(monkeypatch, tmp_path)
         now = datetime.now(UTC)
         old_iso = (now - timedelta(days=100)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -12892,9 +12902,7 @@ class TestKnowledgeGovernanceT704:
         assert len(patterns_entries) == 1
         assert patterns_entries[0]["pattern"] == "fresh pattern"
 
-    def test_dedup_during_sync_reports_duplicate_count(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
+    def test_dedup_during_sync_reports_duplicate_count(self, tmp_path: Path, monkeypatch) -> None:
         _configure_loop_paths(monkeypatch, tmp_path)
         context_dir = tmp_path / ".loop" / "context"
         context_dir.mkdir(parents=True, exist_ok=True)
@@ -12908,9 +12916,15 @@ class TestKnowledgeGovernanceT704:
         )
         now_iso = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         (context_dir / "patterns.jsonl").write_text(
-            json.dumps({"pattern": "dup pattern", "category": "workflow", "confidence": 0.5, "last_verified": now_iso}, ensure_ascii=False)
+            json.dumps(
+                {"pattern": "dup pattern", "category": "workflow", "confidence": 0.5, "last_verified": now_iso},
+                ensure_ascii=False,
+            )
             + "\n"
-            + json.dumps({"pattern": "dup pattern", "category": "workflow", "confidence": 0.9, "last_verified": now_iso}, ensure_ascii=False)
+            + json.dumps(
+                {"pattern": "dup pattern", "category": "workflow", "confidence": 0.9, "last_verified": now_iso},
+                ensure_ascii=False,
+            )
             + "\n",
             encoding="utf-8",
         )
@@ -12928,9 +12942,7 @@ class TestKnowledgeGovernanceT704:
         assert result["deduped"] >= 2
         assert result["ready"] is True
 
-    def test_cmd_status_shows_stale_counts_for_facts_and_pitfalls(
-        self, tmp_path: Path, monkeypatch, capsys
-    ) -> None:
+    def test_cmd_status_shows_stale_counts_for_facts_and_pitfalls(self, tmp_path: Path, monkeypatch, capsys) -> None:
         _configure_loop_paths(monkeypatch, tmp_path)
         facts_path, pitfalls_path, patterns_path = _configure_default_knowledge_paths(monkeypatch, tmp_path)
         now = datetime.now(UTC)
@@ -13089,9 +13101,7 @@ def test_lock_file_creation_and_parent_dir(tmp_path: Path) -> None:
     lock_path.unlink(missing_ok=True)
 
 
-def test_lock_cross_platform_windows_msvcrt_mock(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_lock_cross_platform_windows_msvcrt_mock(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Mock os.name == 'nt' and msvcrt module to verify Windows locking path."""
     fake_msvcrt = types.ModuleType("msvcrt")
     calls: list[tuple[int, int, int]] = []
@@ -13124,9 +13134,7 @@ def test_lock_cross_platform_windows_msvcrt_mock(
     lock_path.unlink(missing_ok=True)
 
 
-def test_lock_cross_platform_unix_fcntl_mock(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_lock_cross_platform_unix_fcntl_mock(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Mock os.name == 'posix' and fcntl module to verify Unix locking path."""
     fake_fcntl = types.ModuleType("fcntl")
     calls: list[tuple[int, int]] = []
@@ -13251,10 +13259,12 @@ def test_lock_release_without_acquire_is_noop(tmp_path: Path) -> None:
 
 # ── G1.1: GIT_DIR worktree isolation tests ───────────────────────────────
 
+
 class TestGITDirWorktreeIsolation:
     def test_git_dir_set_when_cwd_is_worktree(self, tmp_path, monkeypatch):
         """When cwd has .git as a file (worktree), Popen env includes GIT_DIR."""
         import subprocess, os as _os
+
         call_kwargs = {}
         orig_popen = subprocess.Popen
 
@@ -13272,13 +13282,14 @@ class TestGITDirWorktreeIsolation:
 
         # Inline the env-setting logic from _run_auto_dispatch (lines 3115-3126)
         import pathlib
+
         proc_env = _os.environ.copy()
         actual_cwd = pathlib.Path(wt_dir)
         git_file = actual_cwd / ".git"
         if git_file.is_file() and not git_file.is_dir():
             gitdir_raw = git_file.read_text(encoding="utf-8").strip()
             if gitdir_raw.startswith("gitdir: "):
-                gitdir = gitdir_raw[len("gitdir: "):]
+                gitdir = gitdir_raw[len("gitdir: ") :]
                 proc_env["GIT_DIR"] = gitdir
                 proc_env["GIT_WORK_TREE"] = str(actual_cwd)
 
@@ -13288,6 +13299,7 @@ class TestGITDirWorktreeIsolation:
     def test_git_dir_not_set_when_git_is_directory(self, tmp_path, monkeypatch):
         """When .git is a directory (normal repo), GIT_DIR is NOT set."""
         import os as _os, pathlib
+
         (tmp_path / ".git").mkdir()
         proc_env = _os.environ.copy()
         git_file = pathlib.Path(tmp_path) / ".git"
@@ -13298,6 +13310,7 @@ class TestGITDirWorktreeIsolation:
     def test_git_dir_skip_on_broken_git_file(self, tmp_path, monkeypatch):
         """When .git file has invalid format, GIT_DIR is NOT set."""
         import os as _os, pathlib
+
         wt_dir = tmp_path / "worktree"
         wt_dir.mkdir()
         (wt_dir / ".git").write_text("this is not a valid gitdir reference\n")
@@ -13312,10 +13325,12 @@ class TestGITDirWorktreeIsolation:
 
 # ── G2.1: _cleanup_stale_lock boundary tests ─────────────────────────────
 
+
 class TestCleanupStaleLock:
     def test_pid_alive_keeps_lock(self, tmp_path, monkeypatch):
         import os
         from loop_kit.orchestrator import _cleanup_stale_lock
+
         lock_path = tmp_path / "lock"
         lock_path.write_text(f"pid:{os.getpid()}\n")
         _cleanup_stale_lock(lock_path)
@@ -13323,6 +13338,7 @@ class TestCleanupStaleLock:
 
     def test_pid_dead_removes_lock(self, tmp_path, monkeypatch):
         from loop_kit.orchestrator import _cleanup_stale_lock
+
         lock_path = tmp_path / "lock"
         # Use a very high PID that almost certainly doesn't exist
         lock_path.write_text("pid:99999999\n")
@@ -13331,6 +13347,7 @@ class TestCleanupStaleLock:
 
     def test_invalid_pid_skips(self, tmp_path):
         from loop_kit.orchestrator import _cleanup_stale_lock
+
         lock_path = tmp_path / "lock"
         lock_path.write_text("pid:not_a_number\n")
         _cleanup_stale_lock(lock_path)
@@ -13338,15 +13355,18 @@ class TestCleanupStaleLock:
 
     def test_no_lock_file_skips(self, tmp_path):
         from loop_kit.orchestrator import _cleanup_stale_lock
+
         _cleanup_stale_lock(tmp_path / "nonexistent")
         # Should not raise
 
 
 # ── G2.2: _prune_stale_worktrees tests ──────────────────────────────────
 
+
 class TestPruneStaleWorktrees:
     def test_orphan_directory_removed(self, tmp_path, monkeypatch):
         import loop_kit.orchestrator as orchestrator
+
         monkeypatch.setattr(orchestrator, "_LOOP_DIR", tmp_path / ".loop")
         orchestrator._configure_loop_paths(tmp_path / ".loop")
         resolved = orchestrator._resolve_paths()
@@ -13361,6 +13381,7 @@ class TestPruneStaleWorktrees:
 
     def test_registered_worktree_preserved(self, tmp_path, monkeypatch):
         import loop_kit.orchestrator as orchestrator
+
         monkeypatch.setattr(orchestrator, "_LOOP_DIR", tmp_path / ".loop")
         orchestrator._configure_loop_paths(tmp_path / ".loop")
         resolved = orchestrator._resolve_paths()
@@ -13375,6 +13396,7 @@ class TestPruneStaleWorktrees:
 
     def test_no_worktrees_dir_returns_zero(self, tmp_path, monkeypatch):
         import loop_kit.orchestrator as orchestrator
+
         monkeypatch.setattr(orchestrator, "_LOOP_DIR", tmp_path / ".loop")
         orchestrator._configure_loop_paths(tmp_path / ".loop")
         resolved = orchestrator._resolve_paths()
@@ -13384,9 +13406,11 @@ class TestPruneStaleWorktrees:
 
 # ── G2.3: cmd_config output format test ────────────────────────────────
 
+
 class TestCmdConfigOutput:
     def test_config_shows_key_fields(self, tmp_path, monkeypatch, capsys):
         import loop_kit.orchestrator as orchestrator
+
         monkeypatch.setattr(orchestrator, "_LOOP_DIR", tmp_path / ".loop")
         orchestrator._configure_loop_paths(tmp_path / ".loop")
         orchestrator.cmd_config()
@@ -13401,9 +13425,11 @@ class TestCmdConfigOutput:
 
 # ── G2.4: _fail_with_state outcome branch tests ────────────────────────
 
+
 class TestFailWithStateOutcomes:
     def _fail_and_check_outcome(self, tmp_path, monkeypatch, outcome, message):
         import loop_kit.orchestrator as orchestrator
+
         monkeypatch.setattr(orchestrator, "_LOOP_DIR", tmp_path / ".loop")
         orchestrator._configure_loop_paths(tmp_path / ".loop")
         monkeypatch.setattr(orchestrator, "_is_git_repo_root", lambda _: False)
@@ -13412,12 +13438,15 @@ class TestFailWithStateOutcomes:
 
         state = {
             "state": orchestrator.STATE_AWAITING_WORK,
-            "round": 1, "task_id": "T-FAIL", "run_id": "run-fail",
-            "base_sha": "abc", "head_sha": "def", "round_details": [],
+            "round": 1,
+            "task_id": "T-FAIL",
+            "run_id": "run-fail",
+            "base_sha": "abc",
+            "head_sha": "def",
+            "round_details": [],
         }
         with pytest.raises(SystemExit):
-            orchestrator._fail_with_state(state, outcome=outcome, message=message,
-                                          exit_code=1, paths=resolved)
+            orchestrator._fail_with_state(state, outcome=outcome, message=message, exit_code=1, paths=resolved)
         assert resolved.summary.exists(), f"summary.json not written for {outcome}"
         data = json.loads(resolved.summary.read_text(encoding="utf-8"))
         assert data["outcome"] == outcome
