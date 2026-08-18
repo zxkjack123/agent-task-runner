@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import builtins
+import contextlib
 import hashlib
 import json
 import os
@@ -12944,7 +12945,7 @@ class TestKnowledgeGovernanceT704:
 
     def test_cmd_status_shows_stale_counts_for_facts_and_pitfalls(self, tmp_path: Path, monkeypatch, capsys) -> None:
         _configure_loop_paths(monkeypatch, tmp_path)
-        facts_path, pitfalls_path, patterns_path = _configure_default_knowledge_paths(monkeypatch, tmp_path)
+        facts_path, pitfalls_path, _ = _configure_default_knowledge_paths(monkeypatch, tmp_path)
         now = datetime.now(UTC)
         old_iso = (now - timedelta(days=100)).strftime("%Y-%m-%dT%H:%M:%SZ")
         fresh_iso = (now - timedelta(days=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -13019,10 +13020,8 @@ def test_lock_concurrent_acquisition_second_thread_fails(tmp_path: Path) -> None
             if "already running" not in str(exc):
                 errors.append(f"wrong error message: {exc}")
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 second_lock.release()
-            except Exception:
-                pass
 
     holder_thread = threading.Thread(target=holder)
     contender_thread = threading.Thread(target=contender)
