@@ -12,3 +12,4 @@ nul
 .coverage
 /answer.py
 /greet.py
+/traces/

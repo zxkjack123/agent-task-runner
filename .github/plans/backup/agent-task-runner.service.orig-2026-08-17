@@ -1,0 +1,17 @@
+[Unit]
+Description=Agent Task Runner — PM-driven review loop (auto-execute)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/gw/opt/agent-task-runner
+ExecStart=/home/gw/opt/agent-task-runner/.venv/bin/python -m loop_kit run
+Environment=PM_DB_PATH=/home/gw/opt/project_management/data/pm.sqlite
+Environment=HOME=%h
+Restart=always
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
