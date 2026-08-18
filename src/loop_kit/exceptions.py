@@ -16,4 +16,13 @@ from loop_kit._core import (
     ValidationError,
 )
 
-__all__ = ['ConfigError', 'DirtyWorktreeError', 'DispatchError', 'DispatchTimeoutError', 'LoopKitError', 'PermanentDispatchError', 'StateError', 'ValidationError']
+__all__ = [
+    'ConfigError',
+    'DirtyWorktreeError',
+    'DispatchError',
+    'DispatchTimeoutError',
+    'LoopKitError',
+    'PermanentDispatchError',
+    'StateError',
+    'ValidationError',
+]
