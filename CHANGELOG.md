@@ -6,6 +6,16 @@
 - **doc-pipeline & doc-fix prompt templates**（`c6d6e39`/`7b8ff54`/`9b51310`/`d24546c`/`6f1a16f`/`9325f79`）: `.loop/templates/` 双轨镜像 4 个专用模板对（doc_pipeline/doc_fix worker+reviewer，与 project_management `data/loop_templates/templates/` 逐字节一致）；模板 render 回归测试 `tests/test_doc_pipeline_compat.py`（含 loop_kit 兼容性核查：work_report.json 终态保留 / 未知 outcome → resume_failure / max_rounds_exhausted）
 - **兼容性约定**: doc_pipeline/doc_fix 循环由 bridge 侧 `--worker-noop-as-success` 驱动（哨兵终态合法零变更）；PRECONDITION-FAILED 哨兵由 PM 侧 M5 消费
 
+## PM #2749 — Lint Debt Cleanup (2026-08-18)
+
+### Lint
+- **0 lint errors (104 → 0)**: ruff debt fully cleared. B1 automatic `ruff --fix` (62 fixes) then B2 manual semantic passes: B2a `_core.py`, B2b `__all__` line-wraps (`exceptions`/`paths`/`state`/`file_bus`/`dispatch`/`session`/`config`/`prompts`/`knowledge`/`git_helpers`), B2c test files (`test_pm_integration`/`test_doc_pipeline_compat`/`test_integration`/`test_orchestrator`). `ruff check src/loop_kit tests` → 0 errors.
+- **Re-export contract preserved**: every `__all__` wrapped via `ast.literal_eval` round-trip — symbol set and order byte-identical; `from loop_kit.orchestrator import *` smoke passes.
+- **Tests**: `pytest` → 615 passed / 0 failed; `py_compile` + import + CLI smoke all exit 0 (V1-V5 gate).
+
+### Stability
+- **`.loop/` transient residue purge (disk-only, no git diff)**: stale `.state.json.bak`, `events.jsonl` archive/cached dirs, orphan lock with dead PID removed; e2e fixtures + tracked assets retained. Runtime-recreated dirs regenerate normally on next loop run.
+
 ## v0.4.0 (2026-07-03)
 
 ### Architecture (T-703, T-721, T-722)

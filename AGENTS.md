@@ -46,7 +46,8 @@
 ## Validation Commands
 
 ```bash
+uv run ruff check src/loop_kit tests          # 0 errors (PM #2749)
 uv run python -m py_compile src/loop_kit/orchestrator.py
 uv run python -c "from loop_kit.orchestrator import *"
-uv run --group dev pytest
+uv run --group dev pytest                      # 615 passed / 0 failed (PM #2749)
 ```
