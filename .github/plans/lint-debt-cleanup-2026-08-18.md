@@ -432,3 +432,40 @@ workspace: "/home/gw/opt/agent-task-runner"
 ### 执行时注意
 5. CI 红时 revert 非有效回退（基线 104 errors 本身也是红的）——唯一路径 fix-forward + 上报；计划已隐含，执行时写死此决策。
 6. push 范围 = 26 个既有未推送 commit + 8 个 lint commit（fast-forward，实测无冲突）。
+
+## Execution Log
+
+### Post-Execution Verification Log（2026-08-18，Task Executor 执行记录）
+
+- **执行结果**: COMPLETED（9/9 代码任务 + A 批磁盘清理，全部通过）
+- **A 批（T1.1）**: `.loop/` 瞬态残留已清除（`.state.json.bak`、`events.jsonl`、`archive/`、`context/`、`logs/`、`handoff/`、`work_reports/`、`runs/`、`worktrees/`、`lock`）；保留 4 个 e2e fixture 与 10 个 tracked 资产；lock PID 2214093 无存活进程（CT 注 4 的权威 PID 检查法）。pytest/CLI 运行会正常重建 context/logs/lock（运行时正常行为）。
+- **B 批 ruff 计数链**: 104 → (B1 fix) 42 → (B2a) 27 → (B2b-1) 24 → (B2b-2) 21 → (B2b-3) 18 → (B2b-4) 17 → (B2c-1) 10 → (B2c-2) 2 → (B2c-3) **0**
+- **CT 合入落实**: ①三环连锁 L216→L4→L214 已执行（ruff 0 确认）；②计划文件随 B1 提交（8c9abd0）；③F841 两处 `_resolve_paths` 赋值按 CT 注 3 删整行（已验证纯函数：仅构造 LoopPaths，无 I/O）；④进程检查用 lock PID 而非 pgrep。
+- **Post-Execution Verification（Automated V1-V5）**:
+  | ID | Command | Result |
+  |----|---------|--------|
+  | V1 | `ruff check src/loop_kit tests` | ✅ rc=0，0 errors |
+  | V2 | `pytest -q` | ✅ 615 passed / 0 failed |
+  | V3 | `py_compile orchestrator.py` | ✅ rc=0 |
+  | V4 | `from loop_kit.orchestrator import *` | ✅ rc=0 |
+  | V5 | `python -m loop_kit --help` | ✅ rc=0 |
+- **Manual Verification**:
+  - D1（CI 门禁）: ⚠️ 部分达成——origin（zxkjack123 fork）已 push（50e7c99..930a73c fast-forward），但该 fork GitHub Actions 从未执行（workflow 注册 active、0 runs，疑似母组织禁用 fork Actions）；upstream（terry-an-investor）push 被拒（403 无写权限）。经用户决策（2026-08-18 两轮 question）：**放弃远端 CI，门禁以本地等价验证 V1-V5 全绿为准**。若需真实 CI：fork Actions 页手动 Enable，或向母仓库开 PR。
+  - P1（git log 含 lint commit）: ✅ 9 个 lint commit（见下），顺序 B1→B2a→B2b×4→B2c×3 与计划一致。**偏差**：计划文本写"8 个"但公式 B1+B2a+B2b×4+B2c×3=9，实推 9 个。
+  - M1（人工抽查 __all__ diff）: 待人工复核（每个 B2b commit 均通过 ast.literal_eval 往返重建校验符号集合与顺序逐字节一致）。
+  - M2（loop 工具链人工确认）: V5 CLI smoke exit 0；ATR cron 状态需人工观察。
+
+- **Commit 列表（9 个 lint commit，均带 #2749）**:
+  | Hash | 内容 |
+  |------|------|
+  | 8c9abd0 | B1 ruff --fix（62 fixes）+ 计划文件 |
+  | 468eec8 | B2a _core.py（11 E501 + 3 F841 + 1 SIM105）|
+  | f404565 | B2b-1 exceptions/paths/state __all__ |
+  | 45dd3fe | B2b-2 file_bus/dispatch/session __all__ |
+  | aa590eb | B2b-3 config/prompts/knowledge __all__ |
+  | a56ab28 | B2b-4 git_helpers __all__ |
+  | 9cfccc6 | B2c-1 test_pm_integration（含 UTC 三环连锁）|
+  | ec0a622 | B2c-2 doc_pipeline_compat + integration |
+  | 930a73c | B2c-3 test_orchestrator（→ 0 lint errors）|
+- **push 状态**: origin（fork）35 commits fast-forward 成功；upstream 403 未推（用户决定不再推）。
+- **修改文件清单**（B 批）: src/loop_kit/{_core,config,dispatch,exceptions,file_bus,git_helpers,knowledge,paths,prompts,session,state}.py + tests/{test_orchestrator,test_pm_integration,test_bout_to_gitr_coupling,test_doc_pipeline_compat,test_integration}.py + 本计划文件。
