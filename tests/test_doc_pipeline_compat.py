@@ -38,7 +38,7 @@ def _make_paths(tmp_path: Path):
 
 def test_a_work_report_survives_normal_terminal_routing(tmp_path):
     """Terminal-outcome routing never touches work_report.json (M5 direct-read contract)."""
-    loop_dir, paths = _make_paths(tmp_path)
+    loop_dir, _ = _make_paths(tmp_path)
     work = {"task_id": "T-42", "notes": "PRECONDITION-FAILED: tier1=9", "files_changed": [], "tests": []}
     (loop_dir / "work_report.json").write_text(json.dumps(work), encoding="utf-8")
     state = {"outcome": "max_rounds_exhausted", "error": "3 rounds rejected", "state": "done"}
@@ -73,7 +73,7 @@ def test_b_unknown_terminal_outcome_routes_to_resume_failure_not_config_error(tm
 
 def test_c_approved_routes_to_resume_success(tmp_path):
     """Terminal success outcomes still route to resume_success (no regression)."""
-    loop_dir, paths = _make_paths(tmp_path)
+    _, _ = _make_paths(tmp_path)
     state = {"outcome": "approved", "state": "done"}
     handler = _core._dispatch_terminal_outcome(state)
     assert handler is _core._terminal_outcome_handle_resume_success

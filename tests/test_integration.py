@@ -35,10 +35,13 @@ class TestIntegrationFullLoop:
 
         loop_dir = tmp_path / ".loop"
         _write_task_card(loop_dir, "T-INT-1", "Integration test: bootstrap")
-        task_path = str(loop_dir / "tasks" / "T-INT-1_task_card.json")
 
         monkeypatch.setattr(orchestrator, "_LOOP_DIR", loop_dir)
-        monkeypatch.setattr(orchestrator, "_configure_loop_paths", lambda loop_dir_value: orchestrator._build_loop_paths(loop_dir_value))
+        monkeypatch.setattr(
+            orchestrator,
+            "_configure_loop_paths",
+            lambda loop_dir_value: orchestrator._build_loop_paths(loop_dir_value),
+        )
         orchestrator._configure_loop_paths(loop_dir)
         monkeypatch.setattr(orchestrator, "_current_sha", lambda: "abc123def456")
         monkeypatch.setattr(orchestrator, "_is_git_repo_root", lambda _path: True)
@@ -275,7 +278,7 @@ class TestIntegrationKnowledgePipeline:
         )
 
         # Load and index
-        patterns, stale = orchestrator._load_patterns_with_governance(persist=False)
+        patterns, _ = orchestrator._load_patterns_with_governance(persist=False)
         assert len(patterns) == 1
 
         query_text = "resolve_paths path globals"
@@ -287,7 +290,7 @@ class TestIntegrationKnowledgePipeline:
         score = orchestrator._knowledge_score(pattern_text, query_token_weights)
         assert score >= 0.01, f"knowledge_score={score}, pattern_text={pattern_text!r}, tokens={query_token_weights}"
 
-        facts, pitfalls, selected, diag = orchestrator._retrieve_ranked_knowledge(
+        facts, pitfalls, selected, _ = orchestrator._retrieve_ranked_knowledge(
             query_token_weights=query_token_weights,
             query_text=query_text,
             project_fact_entries=[],
@@ -311,7 +314,6 @@ class TestIntegrationKnowledgePipeline:
 
         resolved = orchestrator._resolve_paths()
         resolved.context_dir.mkdir(parents=True, exist_ok=True)
-        paths = orchestrator._resolve_paths()
 
         # Write duplicate facts
         facts_content = "# facts\n- test fact A\n- test fact A\n- test fact B\n"
