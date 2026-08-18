@@ -1,22 +1,20 @@
 """Tests for PM integration improvements (Phase 1-5 of P0-P3 plan)."""
 
 import json
-import sys
+from datetime import UTC
 from pathlib import Path
 
 import pytest
 
 import loop_kit.orchestrator as orchestrator
-
 from loop_kit.orchestrator import (
-    _configure_loop_paths,
-    _resolve_paths,
+    _apply_preflight_to_prompt,
     _copy_outcome_file,
     _execute_verification_check,
     _extract_knowledge_from_round,
     _load_preflight_policy,
-    _apply_preflight_to_prompt,
     _persist_knowledge_updates,
+    _resolve_paths,
 )
 
 
@@ -213,9 +211,9 @@ class TestKnowledgeExtraction:
     def test_persist_knowledge_updates(self, tmp_path: Path, monkeypatch) -> None:
         _setup_loop_dir(monkeypatch, tmp_path)
         monkeypatch.setattr(orchestrator, "_is_git_repo_root", lambda _: False)
-        from datetime import datetime, timezone
+        from datetime import datetime
 
-        now = datetime.now(tz=timezone.utc)
+        now = datetime.now(tz=UTC)
         monkeypatch.setattr(orchestrator._normalize_pattern_entry,
                            "__defaults__", None)
         # Mock _normalize_pattern_entry to accept simpler args

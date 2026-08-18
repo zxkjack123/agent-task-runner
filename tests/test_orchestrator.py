@@ -13069,10 +13069,9 @@ def test_lock_context_manager_releases_on_exception(tmp_path: Path) -> None:
     lock_path = tmp_path / ".loop" / "lock"
     lock = orchestrator._LoopLock(lock_path)
 
-    with pytest.raises(ValueError, match="boom"):
-        with lock:
-            assert lock._handle is not None
-            raise ValueError("boom")
+    with pytest.raises(ValueError, match="boom"), lock:
+        assert lock._handle is not None
+        raise ValueError("boom")
 
     assert lock._handle is None
 
@@ -13263,7 +13262,8 @@ def test_lock_release_without_acquire_is_noop(tmp_path: Path) -> None:
 class TestGITDirWorktreeIsolation:
     def test_git_dir_set_when_cwd_is_worktree(self, tmp_path, monkeypatch):
         """When cwd has .git as a file (worktree), Popen env includes GIT_DIR."""
-        import subprocess, os as _os
+        import os as _os
+        import subprocess
 
         call_kwargs = {}
         orig_popen = subprocess.Popen
@@ -13298,7 +13298,8 @@ class TestGITDirWorktreeIsolation:
 
     def test_git_dir_not_set_when_git_is_directory(self, tmp_path, monkeypatch):
         """When .git is a directory (normal repo), GIT_DIR is NOT set."""
-        import os as _os, pathlib
+        import os as _os
+        import pathlib
 
         (tmp_path / ".git").mkdir()
         proc_env = _os.environ.copy()
@@ -13309,7 +13310,8 @@ class TestGITDirWorktreeIsolation:
 
     def test_git_dir_skip_on_broken_git_file(self, tmp_path, monkeypatch):
         """When .git file has invalid format, GIT_DIR is NOT set."""
-        import os as _os, pathlib
+        import os as _os
+        import pathlib
 
         wt_dir = tmp_path / "worktree"
         wt_dir.mkdir()
@@ -13329,6 +13331,7 @@ class TestGITDirWorktreeIsolation:
 class TestCleanupStaleLock:
     def test_pid_alive_keeps_lock(self, tmp_path, monkeypatch):
         import os
+
         from loop_kit.orchestrator import _cleanup_stale_lock
 
         lock_path = tmp_path / "lock"

@@ -4,7 +4,16 @@ This module re-exports symbols from :mod:`loop_kit._core` that belong to the
 ``exceptions`` section of the ``_SECTION_OWNERSHIP_MAP``.
 """
 
-from loop_kit._core import *  # noqa: F401,F403
-from loop_kit._core import LoopKitError, StateError, DispatchError, ValidationError, ConfigError, DirtyWorktreeError, DispatchTimeoutError, PermanentDispatchError  # noqa: F401
+from loop_kit._core import *  # noqa: F403
+from loop_kit._core import (
+    ConfigError,
+    DirtyWorktreeError,
+    DispatchError,
+    DispatchTimeoutError,
+    LoopKitError,
+    PermanentDispatchError,
+    StateError,
+    ValidationError,
+)
 
-__all__ = ['LoopKitError', 'StateError', 'DispatchError', 'ValidationError', 'ConfigError', 'DirtyWorktreeError', 'DispatchTimeoutError', 'PermanentDispatchError']
+__all__ = ['ConfigError', 'DirtyWorktreeError', 'DispatchError', 'DispatchTimeoutError', 'LoopKitError', 'PermanentDispatchError', 'StateError', 'ValidationError']

@@ -34,8 +34,8 @@ import types
 import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from enum import Enum
 from datetime import UTC, datetime, timedelta
+from enum import Enum
 from pathlib import Path
 from typing import Literal, NotRequired, Required, TypedDict, cast
 
@@ -8349,7 +8349,7 @@ def _load_preflight_policy(paths: LoopPaths | None = None) -> PreflightPolicy:
         try:
             data = _load_config_from_yaml(preflight_path)
         except ConfigError:
-            _log(f"Warning: preflight config invalid, using empty policy")
+            _log("Warning: preflight config invalid, using empty policy")
             return {}
     if isinstance(data, dict):
         return cast(PreflightPolicy, data)

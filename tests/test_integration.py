@@ -1,9 +1,6 @@
 """Integration tests for the full PM → Worker → Reviewer loop lifecycle."""
 
 import json
-import subprocess
-import sys
-import textwrap
 from pathlib import Path
 
 import pytest

@@ -10,7 +10,6 @@ Covers the three compat contracts the doc-pipeline relies on:
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
 import pytest
