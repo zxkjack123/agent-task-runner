@@ -1110,7 +1110,10 @@ def _execute_verification_check(verification: VerificationSpec) -> VerificationR
     if not cmd:
         return {"passed": False, "output": "(no command)", "exit_code": -1, "command": "", "expected_output": ""}
     expected = str(verification.get("expected_output", "")).strip()
-    timeout_sec = int(verification.get("timeout_sec", _VERIFICATION_DEFAULT_TIMEOUT_SEC) or _VERIFICATION_DEFAULT_TIMEOUT_SEC)
+    timeout_sec = int(
+        verification.get("timeout_sec", _VERIFICATION_DEFAULT_TIMEOUT_SEC)
+        or _VERIFICATION_DEFAULT_TIMEOUT_SEC
+    )
     cwd_raw = verification.get("cwd")
     cwd = str(ROOT) if not cwd_raw else str(cwd_raw)
     import shlex
@@ -3833,7 +3836,10 @@ def _sync_knowledge_sqlite_index(
             level="debug",
             data=_feed_data(
                 role="orchestrator",
-                message=f"Knowledge auto-prune: removed {pruned_total} entries older than {_KNOWLEDGE_STALE_PRUNE_DAYS} days",
+                message=(
+                    f"Knowledge auto-prune: removed {pruned_total} entries older than "
+                    f"{_KNOWLEDGE_STALE_PRUNE_DAYS} days"
+                ),
             ),
         )
 
@@ -6527,7 +6533,10 @@ def _save_state(state: dict, paths: LoopPaths | None = None) -> None:
             previous_state = previous
         state_backup.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(state_file, state_backup)
-        _STATE_CMP_KEYS = ("state", "round", "outcome", "task_id", "run_id", "base_sha", "head_sha", "sessions", "lane_state", "head_sha_history")
+        _STATE_CMP_KEYS = (
+            "state", "round", "outcome", "task_id", "run_id", "base_sha", "head_sha", "sessions",
+            "lane_state", "head_sha_history",
+        )
         if previous_state is not None and all(
             previous_state.get(k) == state_to_save.get(k) for k in _STATE_CMP_KEYS
         ):
@@ -7294,7 +7303,11 @@ def _lane_preflight_conflict_summary(*, lane_id: str, preflight: LaneMergePrefli
         other_lane_id = right_lane_id if lane_id == left_lane_id else left_lane_id
         raw_paths = item.get("overlapping_paths", [])
         raw_commits = item.get("overlapping_commits", [])
-        overlap_paths = [str(path).strip() for path in raw_paths if str(path).strip()] if isinstance(raw_paths, list) else []
+        overlap_paths = (
+            [str(path).strip() for path in raw_paths if str(path).strip()]
+            if isinstance(raw_paths, list)
+            else []
+        )
         overlap_commits = (
             [str(commit).strip() for commit in raw_commits if str(commit).strip()]
             if isinstance(raw_commits, list)
@@ -7468,7 +7481,11 @@ def _cherry_pick_lane_reports(
             if lane_conflict:
                 lane_record["status"] = "deferred_conflict"
             else:
-                lane_record["status"] = "applied_after_defer" if lane_record["applied_commits"] else "already_integrated"
+                lane_record["status"] = (
+                    "applied_after_defer"
+                    if lane_record["applied_commits"]
+                    else "already_integrated"
+                )
             current_head = _current_sha()
         if deferred_failures:
             raise RuntimeError(
@@ -8391,7 +8408,10 @@ def _extract_knowledge_from_round(
         line = line.strip()
         if not line:
             continue
-        if any(kw in line.lower() for kw in ("created", "implemented", "used", "added", "wrote", "fixed", "refactored")):
+        if any(
+            kw in line.lower()
+            for kw in ("created", "implemented", "used", "added", "wrote", "fixed", "refactored")
+        ):
             clean = line.rstrip(".").strip()
             if len(clean) > 10 and len(clean) < 200:
                 patterns.append(clean)
@@ -8981,7 +9001,7 @@ def _fail_with_state(
     )
     _write_task_card_status(task_path or str(resolved_paths.task_card), TASK_STATUS_BLOCKED, paths=paths)
     # Write outcome summary before raising exception (best-effort)
-    try:
+    with contextlib.suppress(OSError):
         _write_round_summary(
             task_id=state.get("task_id", "UNKNOWN"),
             run_id=state.get("run_id", ""),
@@ -8996,8 +9016,6 @@ def _fail_with_state(
             exit_code=exit_code,
             paths=resolved_paths,
         )
-    except OSError:
-        pass
     try:
         # Map exit code to appropriate exception type
         if exit_code == EXIT_VALIDATION_ERROR:
@@ -9251,7 +9269,14 @@ def cmd_init(paths: LoopPaths | None = None) -> None:
 
 
 # ── status ──────────────────────────────────────────────────────────
-def cmd_status(*, tree: bool = False, dependency_map: bool = False, paths: LoopPaths | None = None, json_output: bool = False, outcome_only: bool = False) -> None:
+def cmd_status(
+    *,
+    tree: bool = False,
+    dependency_map: bool = False,
+    paths: LoopPaths | None = None,
+    json_output: bool = False,
+    outcome_only: bool = False,
+) -> None:
     resolved_paths = _resolve_paths(paths)
     state = _load_state(paths=resolved_paths)
 
@@ -10782,7 +10807,13 @@ def _knowledge_write_lock(paths: LoopPaths | None = None):
         lock.release()
 
 
-def _update_knowledge_on_approval(task_id: str, round_num: int, *, run_id: str | None = None, paths: LoopPaths | None = None) -> None:
+def _update_knowledge_on_approval(
+    task_id: str,
+    round_num: int,
+    *,
+    run_id: str | None = None,
+    paths: LoopPaths | None = None,
+) -> None:
     resolved_paths = _resolve_paths(paths)
     sources: list[ReviewReport] = []
     effective_run_id = _normalize_run_id(run_id)
@@ -12298,14 +12329,14 @@ def _run_multi_round_via_subprocess(
                     message=(
                         "state.json contract mismatch after single-round subprocess: "
                         f"expected task_id={task_id} base_sha={base_sha} run_id={run_id}, "
-                        f"got task_id={state.get('task_id')} base_sha={state.get('base_sha')} run_id={state.get('run_id')}"
+                        f"got task_id={state.get('task_id')} base_sha={state.get('base_sha')} "
+                        f"run_id={state.get('run_id')}"
                     ),
                     exit_code=EXIT_VALIDATION_ERROR,
                     task_path=config.task_path,
                 )
                 return
 
-            outcome = state.get("outcome")
             _post_round_handler = _dispatch_post_round(
                 state, round_num, normalized_state_name
             )
@@ -12531,8 +12562,6 @@ def _post_round_handle_awaiting_next_round(
     review: ReviewReport | None = None,
     run_id: str = "",
 ) -> bool:
-    resolved_paths = _resolve_paths(paths)
-    last_decision = "changes_required"
     if (
         fix_list is not None
         and fix_list.get("task_id") == task_id
@@ -13172,7 +13201,11 @@ def main() -> None:
     run_p.add_argument("--single-round", action="store_true", help="Run exactly one round and exit")
     run_p.add_argument("--round", type=int, help="Round number for --single-round mode")
     run_p.add_argument("--allow-dirty", action="store_true", help="Allow run to start with dirty tracked git files")
-    run_p.add_argument("--clean-stale", action="store_true", help="Force-clean stale state.json and bus files from crashed runs")
+    run_p.add_argument(
+        "--clean-stale",
+        action="store_true",
+        help="Force-clean stale state.json and bus files from crashed runs",
+    )
     run_p.add_argument(
         "--cwd",
         default=None,
@@ -13198,7 +13231,13 @@ def main() -> None:
         elif args.cmd == "index":
             cmd_index(paths=resolved_paths)
         elif args.cmd == "status":
-            cmd_status(tree=bool(args.tree), dependency_map=bool(args.dependency_map), paths=resolved_paths, json_output=bool(args.json), outcome_only=bool(args.outcome_only))
+            cmd_status(
+                tree=bool(args.tree),
+                dependency_map=bool(args.dependency_map),
+                paths=resolved_paths,
+                json_output=bool(args.json),
+                outcome_only=bool(args.outcome_only),
+            )
         elif args.cmd == "config":
             cmd_config()
         elif args.cmd == "session":
