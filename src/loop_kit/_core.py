@@ -349,6 +349,12 @@ DEFAULT_MAX_SESSION_ROUNDS = 0
 DEFAULT_MAX_PARALLEL_WORKERS = 2
 DEFAULT_MAX_PARALLEL_WORKERS_CAP = 4
 DEFAULT_WORKER_NOOP_AS_ERROR = True
+# Evidence gating for the default no-change failure path (PM #2911): a worker
+# noop is accepted as terminal success only when cross-run historical evidence
+# exists (archive artifacts / round details). Same-run evidence never counts
+# (CT review 2026-08-20). Disabled via --worker-noop-no-evidence-gating or
+# LOOP_WORKER_NOOP_EVIDENCE_GATING=false.
+DEFAULT_WORKER_NOOP_EVIDENCE_GATING = True
 MAX_DISPATCH_RETRY_DELAY_SEC = 60
 DEFAULT_GIT_TIMEOUT_SEC = 30
 MAX_JSON_PAYLOAD_BYTES = 5 * 1024 * 1024
@@ -521,6 +527,7 @@ _KNOWN_CONFIG_KEYS: frozenset[str] = frozenset({
     "aggressive_parallelism",
     "artifact_timeout",
     "worker_noop_as_error",
+    "worker_noop_evidence_gating",
     "allow_dirty",
     "clean_stale",
     "cwd",
@@ -599,6 +606,7 @@ class RunConfig:
     aggressive_parallelism: bool = False
     artifact_timeout: int = DEFAULT_DISPATCH_ARTIFACT_TIMEOUT_SEC
     worker_noop_as_error: bool = DEFAULT_WORKER_NOOP_AS_ERROR
+    worker_noop_evidence_gating: bool = DEFAULT_WORKER_NOOP_EVIDENCE_GATING
     allow_dirty: bool = False
     clean_stale: bool = False
     cwd: str | None = None
@@ -8600,6 +8608,7 @@ def _validate_run_config(config: RunConfig) -> None:
         ("require_heartbeat", config.require_heartbeat),
         ("auto_dispatch", config.auto_dispatch),
         ("worker_noop_as_error", config.worker_noop_as_error),
+        ("worker_noop_evidence_gating", config.worker_noop_evidence_gating),
         ("allow_dirty", config.allow_dirty),
         ("verbose", config.verbose),
         ("aggressive_parallelism", config.aggressive_parallelism),
@@ -8657,6 +8666,10 @@ def _load_env_config() -> dict:
     worker_noop_as_error_raw = os.getenv("LOOP_WORKER_NOOP_AS_ERROR")
     if worker_noop_as_error_raw is not None and worker_noop_as_error_raw.strip():
         env_cfg["worker_noop_as_error"] = worker_noop_as_error_raw
+
+    worker_noop_evidence_gating_raw = os.getenv("LOOP_WORKER_NOOP_EVIDENCE_GATING")
+    if worker_noop_evidence_gating_raw is not None and worker_noop_evidence_gating_raw.strip():
+        env_cfg["worker_noop_evidence_gating"] = worker_noop_evidence_gating_raw
 
     backend_pref_raw = os.getenv("LOOP_BACKEND_PREFERENCE")
     if backend_pref_raw is not None:
@@ -10067,6 +10080,7 @@ def cmd_config() -> None:
         ("dispatch_backend", "native"),
         ("auto_dispatch", False),
         ("worker_noop_as_error", True),
+        ("worker_noop_evidence_gating", True),
         ("allow_dirty", False),
         ("verbose", False),
         ("aggressive_parallelism", False),
@@ -10247,6 +10261,10 @@ def _single_round_subprocess_cmd(
         cmd.append("--worker-noop-as-error")
     else:
         cmd.append("--worker-noop-as-success")
+    if config.worker_noop_evidence_gating:
+        cmd.append("--worker-noop-evidence-gating")
+    else:
+        cmd.append("--worker-noop-no-evidence-gating")
     if config.verbose:
         cmd.append("--verbose")
     if config.outcome_file:
@@ -12034,6 +12052,7 @@ def _run_single_round(
     round_detail = {
         "round": round_num,
         "started_at": state.get("started_at"),
+        "run_id": run_id,
         "worker_notes": work.get("notes", ""),
         "tests_summary": _tests_summary(work.get("tests", [])),
         "review_decision": decision,
@@ -12651,6 +12670,120 @@ def _terminal_outcome_handle_error(
     raise ValidationError(f"Cannot resume from terminal error state: {outcome}")
 
 
+def _noop_evidence_from_archive(
+    task_id: str,
+    round_num: int,
+    run_id: str,
+    paths: LoopPaths | None = None,
+) -> dict | None:
+    """P1/P2 evidence from archived round artifacts (best-effort, never raises).
+
+    Cross-run only (CT review 2026-08-20): artifacts whose ``run_id`` equals
+    the current run's ``run_id`` are excluded — same-run evidence is
+    anti-correlated with "task already done" (a prior round in the same run
+    got changes_required; trusting it would dodge the reviewer).
+
+    Strength order: ``files_changed`` (STRONG) > state outcome / approved
+    round_details (STRONG) > notes (MEDIUM, NOT self-certifying — see below).
+    """
+    resolved_paths = _resolve_paths(paths)
+    rounds = _archive_rounds_for_task(task_id, paths=resolved_paths)
+    for r in rounds:
+        for artifact_name in ("work_report", "state"):
+            try:
+                payload = _load_archived_round_artifact(task_id, r, artifact_name, paths=resolved_paths)
+            except Exception:
+                # Best-effort (CT review): malformed/corrupt archives must never
+                # introduce a new failure mode; skip the artifact.
+                continue
+            if not isinstance(payload, dict):
+                continue
+            artifact_run_id = _normalize_run_id(payload.get("run_id"))
+            if run_id is not None and artifact_run_id == run_id:
+                # Same-run artifacts (any round) never count as evidence.
+                continue
+            if artifact_name == "work_report":
+                files_changed = payload.get("files_changed")
+                if isinstance(files_changed, list) and any(
+                    isinstance(entry, str) and entry for entry in files_changed
+                ):
+                    return {
+                        "source": "archive_work_report",
+                        "round": r,
+                        "run_id": artifact_run_id,
+                        "detail": "files_changed non-empty",
+                    }
+                continue
+            # artifact_name == "state"
+            outcome = payload.get("outcome")
+            if outcome in _TERMINAL_SUCCESS_OUTCOMES:
+                return {
+                    "source": "archive_state",
+                    "round": r,
+                    "run_id": artifact_run_id,
+                    "detail": f"outcome={outcome}",
+                }
+            round_details = payload.get("round_details")
+            if isinstance(round_details, list):
+                for item in round_details:
+                    if not isinstance(item, dict):
+                        continue
+                    if item.get("review_decision") == "approve":
+                        return {
+                            "source": "archive_state",
+                            "round": r,
+                            "run_id": artifact_run_id,
+                            "detail": "round_details review_decision=approve",
+                        }
+    # Notes-only evidence never self-certifies (CT review): a cross-run noop
+    # report (notes="already done") must not become evidence in a later run,
+    # otherwise a zero-work task reaches done via repeated noops. Notes
+    # therefore require corroboration by a STRONG hit — and since strong hits
+    # return above, any notes-only archive yields no verdict here.
+    return None
+
+
+def _noop_evidence_from_round_details(state: dict, round_num: int, run_id: str) -> dict | None:
+    """P3 evidence from in-memory round_details (cross-run carry-forward).
+
+    Only entries from a *different round* whose recorded ``run_id`` differs
+    from the current run count. Entries without a ``run_id`` field cannot be
+    proven cross-run and are excluded (safe side). Only an explicit
+    ``review_decision == "approve"`` is decisive — worker_notes alone is not
+    (same self-certification concern as P1 notes).
+    """
+    for item in state.get("round_details", []):
+        if not isinstance(item, dict):
+            continue
+        if item.get("round") == round_num:
+            continue
+        item_run_id = _normalize_run_id(item.get("run_id"))
+        if run_id is not None and item_run_id == run_id:
+            continue
+        if item.get("review_decision") == "approve":
+            return {
+                "source": "round_details",
+                "round": item.get("round"),
+                "run_id": item_run_id,
+                "detail": "review_decision=approve",
+            }
+    return None
+
+
+def _resolve_noop_evidence(
+    state: dict,
+    task_id: str,
+    round_num: int,
+    run_id: str,
+    paths: LoopPaths | None = None,
+) -> dict | None:
+    """Resolve no-change evidence: archive first, then in-memory round details."""
+    evidence = _noop_evidence_from_archive(task_id, round_num, run_id, paths=paths)
+    if evidence is not None:
+        return evidence
+    return _noop_evidence_from_round_details(state, round_num, run_id)
+
+
 def _single_round_handle_worker_noop(
     state: dict,
     work: WorkReport,
@@ -12669,14 +12802,23 @@ def _single_round_handle_worker_noop(
         "Worker reported no code changes after immutable ref resolution: "
         f"head_sha == base_sha ({head_sha}). task_id={task_id} round={round_num}"
     )
+    evidence = (
+        _resolve_noop_evidence(state, task_id, round_num, run_id, resolved_paths)
+        if (config.worker_noop_as_error and config.worker_noop_evidence_gating)
+        else None
+    )
+    take_success = (not config.worker_noop_as_error) or evidence is not None
     round_detail = {
         "round": round_num,
         "started_at": state.get("started_at"),
+        "run_id": run_id,
         "worker_notes": work.get("notes", ""),
         "tests_summary": _tests_summary(work.get("tests", [])),
-        "review_decision": "skipped_no_change",
-        "round_outcome": "validation_failure" if config.worker_noop_as_error else "no_change_success",
+        "review_decision": "skipped_no_change_evidence" if evidence is not None else "skipped_no_change",
+        "round_outcome": "no_change_success" if take_success else "validation_failure",
     }
+    if evidence is not None:
+        round_detail["no_change_evidence"] = evidence
     round_details = [
         item
         for item in state.get("round_details", [])
@@ -12684,7 +12826,7 @@ def _single_round_handle_worker_noop(
     ]
     round_details.append(round_detail)
     state["round_details"] = round_details
-    if config.worker_noop_as_error:
+    if config.worker_noop_as_error and evidence is None:
         _write_round_summary(
             task_id=task_id,
             run_id=run_id,
@@ -12700,7 +12842,7 @@ def _single_round_handle_worker_noop(
             worker_notes=str(work.get("notes", "")),
             paths=resolved_paths,
         )
-        raise ValidationError(noop_message)
+        raise ValidationError(noop_message + " (evidence gating enabled but no historical evidence found)")
 
     _apply_state_transition(
         state,
@@ -12728,15 +12870,18 @@ def _single_round_handle_worker_noop(
     )
     _persist_knowledge_updates(knowledge_noop, paths=resolved_paths)
     _archive_task_summary(task_id, paths=resolved_paths)
+    feed_payload = _feed_data(
+        task_id=task_id,
+        round_num=round_num,
+        role="orchestrator",
+        decision="skipped_no_change",
+        outcome="no_change_success",
+    )
+    if evidence is not None:
+        feed_payload["no_change_evidence"] = evidence
     _feed_event(
         FEED_ROUND_COMPLETE,
-        data=_feed_data(
-            task_id=task_id,
-            round_num=round_num,
-            role="orchestrator",
-            decision="skipped_no_change",
-            outcome="no_change_success",
-        ),
+        data=feed_payload,
     )
     _log(f"No-change success accepted. head_sha={head_sha}")
     print(f"  Worker no-change success: {head_sha[:8]}")
@@ -13198,6 +13343,18 @@ def main() -> None:
         default=None,
         help="Treat worker no-change submissions (head==base) as terminal success and skip reviewer",
     )
+    run_p.add_argument(
+        "--worker-noop-evidence-gating",
+        action="store_true",
+        default=None,
+        help="Enable evidence gating on the default no-change failure path (default)",
+    )
+    run_p.add_argument(
+        "--worker-noop-no-evidence-gating",
+        action="store_true",
+        default=None,
+        help="Disable evidence gating; no-change without --worker-noop-as-success always fails",
+    )
     run_p.add_argument("--single-round", action="store_true", help="Run exactly one round and exit")
     run_p.add_argument("--round", type=int, help="Round number for --single-round mode")
     run_p.add_argument("--allow-dirty", action="store_true", help="Allow run to start with dirty tracked git files")
@@ -13318,6 +13475,15 @@ def main() -> None:
                 worker_noop_as_error_cli = True
             elif args.worker_noop_as_success:
                 worker_noop_as_error_cli = False
+            worker_noop_evidence_gating_cli: bool | None = None
+            if args.worker_noop_evidence_gating and args.worker_noop_no_evidence_gating:
+                raise ValidationError(
+                    "--worker-noop-evidence-gating and --worker-noop-no-evidence-gating are mutually exclusive"
+                )
+            if args.worker_noop_evidence_gating:
+                worker_noop_evidence_gating_cli = True
+            elif args.worker_noop_no_evidence_gating:
+                worker_noop_evidence_gating_cli = False
             config = RunConfig(
                 task_path=_coerce_str_config(task_path, field_name="task_path"),
                 max_rounds=_coerce_int_config(
@@ -13393,6 +13559,14 @@ def main() -> None:
                         DEFAULT_WORKER_NOOP_AS_ERROR,
                     ),
                     field_name="worker_noop_as_error",
+                ),
+                worker_noop_evidence_gating=_coerce_bool_config(
+                    _cfg_val(
+                        worker_noop_evidence_gating_cli,
+                        "worker_noop_evidence_gating",
+                        DEFAULT_WORKER_NOOP_EVIDENCE_GATING,
+                    ),
+                    field_name="worker_noop_evidence_gating",
                 ),
                 allow_dirty=args.allow_dirty,
                 clean_stale=args.clean_stale,

@@ -4899,6 +4899,666 @@ def test_single_round_no_change_default_is_validation_failure(tmp_path: Path, mo
     assert "no code changes" in state["error"]
 
 
+# ── PM #2911: no-change evidence gating ─────────────────────────────────────
+
+
+def _prestage_archive_artifact(tmp_path: Path, name: str, payload: object) -> Path:
+    archive_dir = orchestrator.LOOP_DIR / "archive" / "T-604"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    path = archive_dir / name
+    if isinstance(payload, bytes):
+        path.write_bytes(payload)
+    else:
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def _noop_state_payload(*, round_num: int, run_id: str | None = None) -> dict:
+    payload: dict = {
+        "state": orchestrator.STATE_AWAITING_WORK,
+        "round": round_num,
+        "task_id": "T-604",
+        "base_sha": "base-ref",
+    }
+    if run_id is not None:
+        payload["run_id"] = run_id
+    return payload
+
+
+def test_single_round_no_change_with_archive_evidence_is_success(tmp_path: Path, monkeypatch) -> None:
+    _configure_loop_paths(monkeypatch, tmp_path)
+
+    task_path = tmp_path / "task_input.json"
+    task_path.write_text(
+        json.dumps({"task_id": "T-604", "goal": "no change with archive evidence"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    orchestrator.STATE_FILE.write_text(
+        json.dumps(_noop_state_payload(round_num=1), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    _prestage_archive_artifact(
+        tmp_path,
+        "r1_work_report.json",
+        {
+            "task_id": "T-604",
+            "round": 1,
+            "run_id": "prev-run",
+            "head_sha": "old-sha",
+            "files_changed": ["src/x.py"],
+            "notes": "",
+        },
+    )
+
+    def fake_wait(path: Path, description: str, **kwargs) -> dict | None:
+        _ = (description, kwargs)
+        if path == orchestrator.WORK_REPORT:
+            return {
+                "task_id": "T-604",
+                "round": 1,
+                "head_sha": "head-ref",
+                "files_changed": [],
+                "tests": [],
+                "notes": "noop",
+            }
+        if path == orchestrator.REVIEW_REPORT:
+            raise AssertionError("reviewer should not run when evidence-gated no-change succeeds")
+        return None
+
+    monkeypatch.setattr(orchestrator, "_wait_for_file", fake_wait)
+    monkeypatch.setattr(orchestrator, "_is_git_repo_root", lambda _path: True)
+    monkeypatch.setattr(
+        orchestrator,
+        "_resolve_commit_oid",
+        lambda ref: {"base-ref": "same-oid", "head-ref": "same-oid", "same-oid": "same-oid"}[ref],
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_diff",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("diff should not run for no-change success")),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_log_oneline",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("log should not run for no-change success")),
+    )
+
+    orchestrator.cmd_run(
+        _run_config(str(task_path), allow_dirty=True),
+        single_round=True,
+        round_num=1,
+    )
+
+    state = json.loads(orchestrator.STATE_FILE.read_text(encoding="utf-8"))
+    summary = json.loads((orchestrator.LOOP_DIR / "summary.json").read_text(encoding="utf-8"))
+    assert state["state"] == orchestrator.STATE_DONE
+    assert state["outcome"] == "no_change_success"
+    assert summary["outcome"] == "no_change_success"
+    assert summary["round_details"][-1]["no_change_evidence"]["source"] == "archive_work_report"
+    assert summary["round_details"][-1]["review_decision"] == "skipped_no_change_evidence"
+    assert (orchestrator.LOOP_DIR / "review_request.json").exists() is False
+
+
+def test_single_round_no_change_with_archive_state_evidence_is_success(tmp_path: Path, monkeypatch) -> None:
+    _configure_loop_paths(monkeypatch, tmp_path)
+
+    task_path = tmp_path / "task_input.json"
+    task_path.write_text(
+        json.dumps({"task_id": "T-604", "goal": "no change with archive state evidence"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    orchestrator.STATE_FILE.write_text(
+        json.dumps(_noop_state_payload(round_num=1), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    _prestage_archive_artifact(
+        tmp_path,
+        "r1_state.json",
+        {"task_id": "T-604", "round": 1, "run_id": "prev-run", "outcome": "approved"},
+    )
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_wait_for_file",
+        lambda path, description, **kwargs: (
+            {"task_id": "T-604", "round": 1, "head_sha": "head-ref", "files_changed": [], "tests": [], "notes": "noop"}
+            if path == orchestrator.WORK_REPORT
+            else None
+        ),
+    )
+    monkeypatch.setattr(orchestrator, "_is_git_repo_root", lambda _path: True)
+    monkeypatch.setattr(
+        orchestrator,
+        "_resolve_commit_oid",
+        lambda ref: {"base-ref": "same-oid", "head-ref": "same-oid", "same-oid": "same-oid"}[ref],
+    )
+
+    orchestrator.cmd_run(
+        _run_config(str(task_path), allow_dirty=True),
+        single_round=True,
+        round_num=1,
+    )
+
+    state = json.loads(orchestrator.STATE_FILE.read_text(encoding="utf-8"))
+    summary = json.loads((orchestrator.LOOP_DIR / "summary.json").read_text(encoding="utf-8"))
+    assert state["outcome"] == "no_change_success"
+    assert summary["round_details"][-1]["no_change_evidence"]["source"] == "archive_state"
+
+
+def test_single_round_no_change_without_evidence_still_fails(tmp_path: Path, monkeypatch) -> None:
+    _configure_loop_paths(monkeypatch, tmp_path)
+
+    task_path = tmp_path / "task_input.json"
+    task_path.write_text(
+        json.dumps({"task_id": "T-604", "goal": "no change no evidence"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    orchestrator.STATE_FILE.write_text(
+        json.dumps(_noop_state_payload(round_num=1), ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_wait_for_file",
+        lambda path, description, **kwargs: (
+            {"task_id": "T-604", "round": 1, "head_sha": "head-ref", "files_changed": [], "tests": [], "notes": "noop"}
+            if path == orchestrator.WORK_REPORT
+            else None
+        ),
+    )
+    monkeypatch.setattr(orchestrator, "_is_git_repo_root", lambda _path: True)
+    monkeypatch.setattr(
+        orchestrator,
+        "_resolve_commit_oid",
+        lambda ref: {"base-ref": "same-oid", "head-ref": "same-oid", "same-oid": "same-oid"}[ref],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        orchestrator.cmd_run(
+            _run_config(str(task_path), allow_dirty=True),
+            single_round=True,
+            round_num=1,
+        )
+
+    assert exc.value.code == 3
+    state = json.loads(orchestrator.STATE_FILE.read_text(encoding="utf-8"))
+    assert state["outcome"] == "validation_failure"
+    assert "no historical evidence" in state["error"]
+
+
+def test_single_round_no_change_evidence_gating_disabled_fails_with_evidence(tmp_path: Path, monkeypatch) -> None:
+    _configure_loop_paths(monkeypatch, tmp_path)
+
+    task_path = tmp_path / "task_input.json"
+    task_path.write_text(
+        json.dumps({"task_id": "T-604", "goal": "gating disabled"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    orchestrator.STATE_FILE.write_text(
+        json.dumps(_noop_state_payload(round_num=1), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    _prestage_archive_artifact(
+        tmp_path,
+        "r1_work_report.json",
+        {
+            "task_id": "T-604",
+            "round": 1,
+            "run_id": "prev-run",
+            "head_sha": "old-sha",
+            "files_changed": ["src/x.py"],
+            "notes": "",
+        },
+    )
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_wait_for_file",
+        lambda path, description, **kwargs: (
+            {"task_id": "T-604", "round": 1, "head_sha": "head-ref", "files_changed": [], "tests": [], "notes": "noop"}
+            if path == orchestrator.WORK_REPORT
+            else None
+        ),
+    )
+    monkeypatch.setattr(orchestrator, "_is_git_repo_root", lambda _path: True)
+    monkeypatch.setattr(
+        orchestrator,
+        "_resolve_commit_oid",
+        lambda ref: {"base-ref": "same-oid", "head-ref": "same-oid", "same-oid": "same-oid"}[ref],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        orchestrator.cmd_run(
+            _run_config(str(task_path), allow_dirty=True, worker_noop_evidence_gating=False),
+            single_round=True,
+            round_num=1,
+        )
+
+    assert exc.value.code == 3
+    state = json.loads(orchestrator.STATE_FILE.read_text(encoding="utf-8"))
+    assert state["outcome"] == "validation_failure"
+
+
+def test_single_round_no_change_ignores_current_run_artifacts(tmp_path: Path, monkeypatch) -> None:
+    # CT 🔴: same-round + same-run archive artifacts are never evidence.
+    _configure_loop_paths(monkeypatch, tmp_path)
+
+    task_path = tmp_path / "task_input.json"
+    task_path.write_text(
+        json.dumps({"task_id": "T-604", "goal": "ignore current run artifacts"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    orchestrator.STATE_FILE.write_text(
+        json.dumps(_noop_state_payload(round_num=1), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(orchestrator, "_new_run_id", lambda: "cur-run")
+    _prestage_archive_artifact(
+        tmp_path,
+        "r1_work_report.json",
+        {
+            "task_id": "T-604",
+            "round": 1,
+            "run_id": "cur-run",
+            "head_sha": "old-sha",
+            "files_changed": ["src/x.py"],
+            "notes": "",
+        },
+    )
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_wait_for_file",
+        lambda path, description, **kwargs: (
+            {"task_id": "T-604", "round": 1, "head_sha": "head-ref", "files_changed": [], "tests": [], "notes": "noop"}
+            if path == orchestrator.WORK_REPORT
+            else None
+        ),
+    )
+    monkeypatch.setattr(orchestrator, "_is_git_repo_root", lambda _path: True)
+    monkeypatch.setattr(
+        orchestrator,
+        "_resolve_commit_oid",
+        lambda ref: {"base-ref": "same-oid", "head-ref": "same-oid", "same-oid": "same-oid"}[ref],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        orchestrator.cmd_run(
+            _run_config(str(task_path), allow_dirty=True),
+            single_round=True,
+            round_num=1,
+        )
+
+    assert exc.value.code == 3
+    state = json.loads(orchestrator.STATE_FILE.read_text(encoding="utf-8"))
+    assert state["outcome"] == "validation_failure"
+
+
+def test_single_round_no_change_same_run_prior_round_work_report_not_evidence(tmp_path: Path, monkeypatch) -> None:
+    # CT 🔴 negative #1: same-run PRIOR-round work_report (changes_required dodge)
+    # must not trigger evidence gating.
+    _configure_loop_paths(monkeypatch, tmp_path)
+
+    task_path = tmp_path / "task_input.json"
+    task_path.write_text(
+        json.dumps({"task_id": "T-604", "goal": "same-run prior round work_report"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    orchestrator.STATE_FILE.write_text(
+        json.dumps(_noop_state_payload(round_num=2, run_id="cur-run"), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    _prestage_archive_artifact(
+        tmp_path,
+        "r1_work_report.json",
+        {
+            "task_id": "T-604",
+            "round": 1,
+            "run_id": "cur-run",
+            "head_sha": "old-sha",
+            "files_changed": ["src/x.py"],
+            "notes": "",
+        },
+    )
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_wait_for_file",
+        lambda path, description, **kwargs: (
+            {"task_id": "T-604", "round": 2, "head_sha": "head-ref", "files_changed": [], "tests": [], "notes": "noop"}
+            if path == orchestrator.WORK_REPORT
+            else None
+        ),
+    )
+    monkeypatch.setattr(orchestrator, "_is_git_repo_root", lambda _path: True)
+    monkeypatch.setattr(
+        orchestrator,
+        "_resolve_commit_oid",
+        lambda ref: {"base-ref": "same-oid", "head-ref": "same-oid", "same-oid": "same-oid"}[ref],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        orchestrator.cmd_run(
+            _run_config(str(task_path), allow_dirty=True),
+            single_round=True,
+            round_num=2,
+        )
+
+    assert exc.value.code == 3
+    state = json.loads(orchestrator.STATE_FILE.read_text(encoding="utf-8"))
+    assert state["outcome"] == "validation_failure"
+
+
+def test_single_round_no_change_same_run_prior_round_state_not_evidence(tmp_path: Path, monkeypatch) -> None:
+    # CT 🔴 negative #2: same-run PRIOR-round state (approved) must not trigger gating.
+    _configure_loop_paths(monkeypatch, tmp_path)
+
+    task_path = tmp_path / "task_input.json"
+    task_path.write_text(
+        json.dumps({"task_id": "T-604", "goal": "same-run prior round state"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    orchestrator.STATE_FILE.write_text(
+        json.dumps(_noop_state_payload(round_num=2, run_id="cur-run"), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    _prestage_archive_artifact(
+        tmp_path,
+        "r1_state.json",
+        {"task_id": "T-604", "round": 1, "run_id": "cur-run", "outcome": "approved"},
+    )
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_wait_for_file",
+        lambda path, description, **kwargs: (
+            {"task_id": "T-604", "round": 2, "head_sha": "head-ref", "files_changed": [], "tests": [], "notes": "noop"}
+            if path == orchestrator.WORK_REPORT
+            else None
+        ),
+    )
+    monkeypatch.setattr(orchestrator, "_is_git_repo_root", lambda _path: True)
+    monkeypatch.setattr(
+        orchestrator,
+        "_resolve_commit_oid",
+        lambda ref: {"base-ref": "same-oid", "head-ref": "same-oid", "same-oid": "same-oid"}[ref],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        orchestrator.cmd_run(
+            _run_config(str(task_path), allow_dirty=True),
+            single_round=True,
+            round_num=2,
+        )
+
+    assert exc.value.code == 3
+    state = json.loads(orchestrator.STATE_FILE.read_text(encoding="utf-8"))
+    assert state["outcome"] == "validation_failure"
+
+
+def test_single_round_no_change_archive_notes_only_is_not_evidence(tmp_path: Path, monkeypatch) -> None:
+    # CT 🟡2: a cross-run noop report's notes must not self-certify a later run.
+    _configure_loop_paths(monkeypatch, tmp_path)
+
+    task_path = tmp_path / "task_input.json"
+    task_path.write_text(
+        json.dumps({"task_id": "T-604", "goal": "notes only not evidence"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    orchestrator.STATE_FILE.write_text(
+        json.dumps(_noop_state_payload(round_num=1), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    _prestage_archive_artifact(
+        tmp_path,
+        "r1_work_report.json",
+        {
+            "task_id": "T-604",
+            "round": 1,
+            "run_id": "prev-run",
+            "head_sha": "old-sha",
+            "files_changed": [],
+            "notes": "verified artifacts exist",
+        },
+    )
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_wait_for_file",
+        lambda path, description, **kwargs: (
+            {"task_id": "T-604", "round": 1, "head_sha": "head-ref", "files_changed": [], "tests": [], "notes": "noop"}
+            if path == orchestrator.WORK_REPORT
+            else None
+        ),
+    )
+    monkeypatch.setattr(orchestrator, "_is_git_repo_root", lambda _path: True)
+    monkeypatch.setattr(
+        orchestrator,
+        "_resolve_commit_oid",
+        lambda ref: {"base-ref": "same-oid", "head-ref": "same-oid", "same-oid": "same-oid"}[ref],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        orchestrator.cmd_run(
+            _run_config(str(task_path), allow_dirty=True),
+            single_round=True,
+            round_num=1,
+        )
+
+    assert exc.value.code == 3
+    state = json.loads(orchestrator.STATE_FILE.read_text(encoding="utf-8"))
+    assert state["outcome"] == "validation_failure"
+
+
+def test_single_round_no_change_archive_malformed_utf8_not_fatal(tmp_path: Path, monkeypatch) -> None:
+    # CT 🟡1: corrupt archive (invalid UTF-8) must skip the artifact, not crash.
+    _configure_loop_paths(monkeypatch, tmp_path)
+
+    task_path = tmp_path / "task_input.json"
+    task_path.write_text(
+        json.dumps({"task_id": "T-604", "goal": "malformed utf8 archive"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    orchestrator.STATE_FILE.write_text(
+        json.dumps(_noop_state_payload(round_num=1), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    _prestage_archive_artifact(
+        tmp_path,
+        "r1_work_report.json",
+        b'{"task_id": "T-604", "round": 1, "run_id": "prev-run", "files_changed": "\xff\xfe"}',
+    )
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_wait_for_file",
+        lambda path, description, **kwargs: (
+            {"task_id": "T-604", "round": 1, "head_sha": "head-ref", "files_changed": [], "tests": [], "notes": "noop"}
+            if path == orchestrator.WORK_REPORT
+            else None
+        ),
+    )
+    monkeypatch.setattr(orchestrator, "_is_git_repo_root", lambda _path: True)
+    monkeypatch.setattr(
+        orchestrator,
+        "_resolve_commit_oid",
+        lambda ref: {"base-ref": "same-oid", "head-ref": "same-oid", "same-oid": "same-oid"}[ref],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        orchestrator.cmd_run(
+            _run_config(str(task_path), allow_dirty=True),
+            single_round=True,
+            round_num=1,
+        )
+
+    assert exc.value.code == 3
+    state = json.loads(orchestrator.STATE_FILE.read_text(encoding="utf-8"))
+    assert state["outcome"] == "validation_failure"
+
+
+def test_single_round_no_change_round_details_cross_run_approve_is_success(tmp_path: Path, monkeypatch) -> None:
+    # P3: cross-run round_details approve entry is evidence.
+    _configure_loop_paths(monkeypatch, tmp_path)
+
+    task_path = tmp_path / "task_input.json"
+    task_path.write_text(
+        json.dumps({"task_id": "T-604", "goal": "round details cross run approve"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    orchestrator.STATE_FILE.write_text(
+        json.dumps(
+            {
+                "state": orchestrator.STATE_AWAITING_WORK,
+                "round": 2,
+                "task_id": "T-604",
+                "base_sha": "base-ref",
+                "run_id": "cur-run",
+                "round_details": [
+                    {
+                        "round": 1,
+                        "run_id": "prev-run",
+                        "review_decision": "approve",
+                        "worker_notes": "",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_wait_for_file",
+        lambda path, description, **kwargs: (
+            {"task_id": "T-604", "round": 2, "head_sha": "head-ref", "files_changed": [], "tests": [], "notes": "noop"}
+            if path == orchestrator.WORK_REPORT
+            else None
+        ),
+    )
+    monkeypatch.setattr(orchestrator, "_is_git_repo_root", lambda _path: True)
+    monkeypatch.setattr(
+        orchestrator,
+        "_resolve_commit_oid",
+        lambda ref: {"base-ref": "same-oid", "head-ref": "same-oid", "same-oid": "same-oid"}[ref],
+    )
+
+    orchestrator.cmd_run(
+        _run_config(str(task_path), allow_dirty=True),
+        single_round=True,
+        round_num=2,
+    )
+
+    state = json.loads(orchestrator.STATE_FILE.read_text(encoding="utf-8"))
+    summary = json.loads((orchestrator.LOOP_DIR / "summary.json").read_text(encoding="utf-8"))
+    assert state["outcome"] == "no_change_success"
+    assert summary["round_details"][-1]["no_change_evidence"]["source"] == "round_details"
+
+
+def test_main_run_parses_worker_noop_evidence_gating_flags(monkeypatch) -> None:
+    captured: dict[str, bool] = {}
+
+    def fake_cmd_run(
+        config: orchestrator.RunConfig,
+        single_round: bool,
+        round_num: int | None,
+        resume: bool = False,
+        reset: bool = False,
+        paths: orchestrator.LoopPaths | None = None,
+        daemon_mode: bool = False,
+    ) -> None:
+        _ = (single_round, round_num, resume, reset)
+        captured["worker_noop_evidence_gating"] = config.worker_noop_evidence_gating
+
+    monkeypatch.setattr(orchestrator, "cmd_run", fake_cmd_run)
+    monkeypatch.delenv("LOOP_WORKER_NOOP_EVIDENCE_GATING", raising=False)
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["orchestrator.py", "run", "--worker-noop-evidence-gating"],
+    )
+    orchestrator.main()
+    assert captured["worker_noop_evidence_gating"] is True
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["orchestrator.py", "run", "--worker-noop-no-evidence-gating"],
+    )
+    orchestrator.main()
+    assert captured["worker_noop_evidence_gating"] is False
+
+    monkeypatch.setattr(sys, "argv", ["orchestrator.py", "run"])
+    orchestrator.main()
+    assert captured["worker_noop_evidence_gating"] is True  # default
+
+
+def test_main_run_rejects_conflicting_worker_noop_evidence_gating_flags(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "orchestrator.py",
+            "run",
+            "--worker-noop-evidence-gating",
+            "--worker-noop-no-evidence-gating",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        orchestrator.main()
+
+    assert exc.value.code == orchestrator.EXIT_VALIDATION_ERROR
+    assert "mutually exclusive" in capsys.readouterr().err
+
+
+def test_outer_loop_propagates_worker_noop_evidence_gating_flag(tmp_path: Path, monkeypatch) -> None:
+    _configure_loop_paths(monkeypatch, tmp_path)
+
+    task_path = tmp_path / "task_input.json"
+    task_path.write_text(
+        json.dumps({"task_id": "T-604", "goal": "evidence gating flag propagation"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(orchestrator, "_current_sha", lambda: "base-sha")
+
+    calls: list[list[str]] = []
+
+    def fake_subprocess_popen(cmd, **kwargs):
+        _ = kwargs
+        calls.append(cmd)
+        state = orchestrator._load_state()
+        state["state"] = orchestrator.STATE_DONE
+        state["outcome"] = "approved"
+        state["head_sha"] = "head-sha"
+        orchestrator._save_state(state)
+        return _FakeProc(stdout_lines=[])
+
+    monkeypatch.setattr(orchestrator.subprocess, "Popen", fake_subprocess_popen)
+
+    orchestrator.cmd_run(
+        _run_config(str(task_path), worker_noop_evidence_gating=True),
+        single_round=False,
+        round_num=None,
+    )
+    assert calls
+    assert "--worker-noop-evidence-gating" in calls[0]
+    assert "--worker-noop-no-evidence-gating" not in calls[0]
+
+    calls.clear()
+    orchestrator.cmd_run(
+        _run_config(str(task_path), worker_noop_evidence_gating=False),
+        single_round=False,
+        round_num=None,
+    )
+    assert calls
+    assert "--worker-noop-no-evidence-gating" in calls[0]
+    assert "--worker-noop-evidence-gating" not in calls[0]
+
+
 def test_single_round_invalid_head_ref_window_is_validation_failure(tmp_path: Path, monkeypatch) -> None:
     _configure_loop_paths(monkeypatch, tmp_path)
 
