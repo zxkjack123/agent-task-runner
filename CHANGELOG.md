@@ -6,6 +6,24 @@
 - **doc-pipeline & doc-fix prompt templates**（`c6d6e39`/`7b8ff54`/`9b51310`/`d24546c`/`6f1a16f`/`9325f79`）: `.loop/templates/` 双轨镜像 4 个专用模板对（doc_pipeline/doc_fix worker+reviewer，与 project_management `data/loop_templates/templates/` 逐字节一致）；模板 render 回归测试 `tests/test_doc_pipeline_compat.py`（含 loop_kit 兼容性核查：work_report.json 终态保留 / 未知 outcome → resume_failure / max_rounds_exhausted）
 - **兼容性约定**: doc_pipeline/doc_fix 循环由 bridge 侧 `--worker-noop-as-success` 驱动（哨兵终态合法零变更）；PRECONDITION-FAILED 哨兵由 PM 侧 M5 消费
 
+## PM #2911 — No-Change Evidence Gating (2026-08-20)
+
+### Feature
+- **no-change 语义证据门控（默认开启）**: worker 幂等确认"任务已完成"（产物已存在且已提交，`head_sha == base_sha`）时，不再一律判定 `validation_failure`（rc=3）。默认路径上增加跨 run 证据判定：有**历史**证据（archive work_report/state + round_details，`run_id != 当前 run_id`）→ 走成功路径 `no_change_success`（reviewer 跳过）；无证据 → 维持失败（防偷懒 worker 蒙混）。复用既有 `no_change_success` outcome，零状态机迁移改动。
+
+### Configuration
+- **kill-switch（flag/env，仅对直接 loop_kit run 生效）**: `--worker-noop-no-evidence-gating` / `LOOP_WORKER_NOOP_EVIDENCE_GATING=false` 关断门控；`--worker-noop-evidence-gating` 显式开启（默认 True）。两 flag 同设 → ValidationError。ATR 任务回滚 = `git revert` C1（bridge cmd 固定硬编码，operator 无法经 ATR 注入 flag）。
+
+### Architecture
+- **证据充分性判定（P1→P4 优先级，命中即停）**: P1 archive `r{N}_work_report.json`（`files_changed`/`notes`）；P2 archive `r{N}_state.json`（`outcome ∈ _TERMINAL_SUCCESS_OUTCOMES` 或 round_details `review_decision=="approve"`）；P3 `state.round_details`（跨轮 carry-forward，排除当前轮）；P4 bridge git evidence 扩窗后消费。排除规则：当前轮 / 当前 run_id 工件不参与判定；读归档异常一律跳过（best-effort，绝不 raise）。
+- **bridge 证据窗口基期修正**: `_detect_artifact_evidence` 窗口基期由 `started_at` 改为 `created_at`（`created_at or started_at`，老行 NULL 回退）——跨 run 上一轮 commit 不再漏检；新增 loop_archive 证据消费（`archive/<task_id>/r*_work_report.json` / `r*_state.json`），支撑 `partial_success` 兜底救援路径。
+
+### Docs / Tests
+- **README.md**: 新增 `### Worker no-change evidence gating` 小节（证据源/优先级、排除规则、flag 一览、kill-switch 说明、与 bridge `partial_success` 兜底 P4 关系）。
+- **Tests**: loop_kit 新增 13 个（证据成功路径 ×3、无证据失败、gating 关闭、当前 run 排除、flag 解析 ×2、outer-loop 传播、同 run prior-round 负向 ×2 等）；bridge 新增 5 个（created_at 基期、started_at 回退、loop_archive x2、malformed 跳过）。
+- **验证**: V1 pytest 628 passed / 0 failed（基线 2 预存在失败当前环境通过，0 新增失败）；V4 定向 noop/evidence 34 passed；V5 bridge 26 passed；ruff/py_compile exit 0。
+- **Deferred**: D1 ATR daemon 重启后 bridge 新逻辑生效（执行时 ATR 进程未运行）。
+
 ## PM #2749 — Lint Debt Cleanup (2026-08-18)
 
 ### Lint
