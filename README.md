@@ -206,6 +206,16 @@ Configuration:
 
 The two flags are mutually exclusive; the outer loop propagates the effective setting to inner single-round subprocesses. Note that the kill-switch flags only take effect for direct `loop_kit run` invocations — the ATR bridge dispatches a fixed command line and cannot inject them; to disable gating for ATR-managed tasks, revert the gating commit or change the bridge dispatch.
 
+### ATR 可靠性机制
+
+ATR 桥接（`python -m loop_kit run`）与 PM 队列之间由以下可靠性机制兜底：
+
+- **preflight 门**：派发前确定性登记质量门，拦截跨仓库/缺 `workspace:` 指令等不满足派发条件的任务
+- **no-change 证据门控**：worker 无改动时仅凭跨 run 历史证据才判定为成功（见上节）
+- **失败三分类**：outcome 按 transient / deterministic / infrastructure 三分类，transient 重试优先、deterministic/infrastructure 证据优先
+- **孤儿终态感知**：孤儿守护进程感知已死的 worker PID，有终态信号即完成写回，真空孤儿才走重试/failed
+- **队列→PM 双向状态回写**：loop 终态写回 `auto_task_queue`，再同步 PM 任务状态与飞书通知
+
 Transition stale-key policy is explicit and validated before `state.json` persistence:
 
 | Transition | Stale keys cleared | Required carry-forward | Forbidden residue |
