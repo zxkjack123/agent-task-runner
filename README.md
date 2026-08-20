@@ -176,8 +176,35 @@ Reviewer → PM: review_report.json
 | `done` | Terminal (approved, timeout, or blocked) |
 
 Worker no-change (`head_sha == base_sha` after immutable OID resolution) is explicit:
-- default: terminal `validation_failure` (`worker_noop_as_error=true`)
+- default: terminal `validation_failure` (`worker_noop_as_error=true`) — unless evidence gating is enabled (default) and cross-run historical evidence exists, in which case the round is accepted as `no_change_success` and the reviewer is skipped
 - optional: terminal `no_change_success` and reviewer is skipped (`--worker-noop-as-success`)
+
+### Worker no-change evidence gating
+
+On the default failure path, a no-change round is only accepted as terminal success when **historical evidence from a previous run** exists. Evidence is evaluated in priority order, first hit wins:
+
+| Priority | Source | Condition |
+|----------|--------|-----------|
+| P1 | `archive/<task_id>/r{N}_work_report.json` | `files_changed` non-empty |
+| P2 | `archive/<task_id>/r{N}_state.json` | `outcome` is a terminal success, or any `round_details` entry has `review_decision == "approve"` |
+| P3 | `state.round_details` (carry-forward) | an entry from a different round with `review_decision == "approve"` |
+| P4 | bridge artifact evidence (PM side) | git commits/dirty files/output files/loop archive (consumed for `partial_success` rescue, not the done path) |
+
+Exclusion rules:
+
+- **Cross-run only**: artifacts and round details whose `run_id` equals the current run's `run_id` never count. A prior round of the *same* run is anti-correlated with "task already done" (the reviewer may have requested changes), so same-run evidence is always ignored.
+- **Notes are not self-certifying**: a `notes`-only work report (e.g. "already done" from a previous noop) does not count by itself — it requires corroboration by a strong hit (P1/P2/P3), in which case the strong source decides.
+- **Corrupt archives are skipped, never fatal**: reading archived artifacts is best-effort; malformed files are ignored without raising.
+
+The verdict is recorded in `summary.json` as `round_details[].no_change_evidence` (`{source, round, run_id, detail}`).
+
+Configuration:
+
+- `--worker-noop-evidence-gating` — enable (default)
+- `--worker-noop-no-evidence-gating` — disable; no-change without `--worker-noop-as-success` always fails
+- `LOOP_WORKER_NOOP_EVIDENCE_GATING=false` — env kill-switch (same effect)
+
+The two flags are mutually exclusive; the outer loop propagates the effective setting to inner single-round subprocesses. Note that the kill-switch flags only take effect for direct `loop_kit run` invocations — the ATR bridge dispatches a fixed command line and cannot inject them; to disable gating for ATR-managed tasks, revert the gating commit or change the bridge dispatch.
 
 Transition stale-key policy is explicit and validated before `state.json` persistence:
 
