@@ -5455,11 +5455,16 @@ def _is_safe_scope_pattern(pattern: str) -> bool:
     candidate = Path(pattern)
     if candidate.is_absolute():
         # Absolute paths are safe only when the target itself — or, when the
-        # target does not yet exist, its nearest existing parent — exists and is
-        # writable by the current user.
+        # target does not yet exist, its nearest existing ancestor directory —
+        # exists and is writable by the current user. If no ancestor directory
+        # exists, the path is rejected.
         try:
-            check_path = candidate if candidate.exists() else candidate.parent
-            return check_path.exists() and os.access(check_path, os.W_OK)
+            check_path = candidate
+            while not check_path.exists() and check_path != check_path.parent:
+                check_path = check_path.parent
+            if not check_path.exists():
+                return False
+            return os.access(check_path, os.W_OK)
         except OSError:
             return False
     return all(part != ".." for part in candidate.parts)
@@ -5495,7 +5500,11 @@ def _build_task_packet(task_card: TaskCard, round_num: int, paths: LoopPaths | N
             except (OSError, RuntimeError):
                 _log(f"Ignoring unreadable in_scope path: {item!r}")
                 continue
-            if not resolved.is_file():
+            # A not-yet-existing file is admitted when its nearest existing
+            # ancestor directory is writable (already verified by
+            # _is_safe_scope_pattern), so the worker can create it. Existing
+            # directories are still skipped.
+            if resolved.exists() and not resolved.is_file():
                 continue
             try:
                 matched_path = resolved.relative_to(root_resolved).as_posix()

@@ -11236,7 +11236,22 @@ class TestBuildTaskPacket:
         finally:
             readonly.chmod(0o644)
 
-    def test_absolute_path_missing_parent_rejected(self, tmp_path: Path, monkeypatch) -> None:
+    def test_absolute_path_new_file_writable_parent_allowed(self, tmp_path: Path, monkeypatch) -> None:
+        _configure_loop_paths(monkeypatch, tmp_path)
+        new_file = tmp_path / "new_file.py"
+
+        task_card = {
+            "goal": "test",
+            "in_scope": [str(new_file)],
+            "acceptance_criteria": [],
+            "constraints": [],
+        }
+
+        packet = orchestrator._build_task_packet(task_card, 1)
+
+        assert "new_file.py" in packet["target_files"]
+
+    def test_absolute_path_new_file_writable_ancestor_allowed(self, tmp_path: Path, monkeypatch) -> None:
         _configure_loop_paths(monkeypatch, tmp_path)
         missing = tmp_path / "no_such_dir" / "file.py"
 
@@ -11246,6 +11261,26 @@ class TestBuildTaskPacket:
             "acceptance_criteria": [],
             "constraints": [],
         }
+
+        packet = orchestrator._build_task_packet(task_card, 1)
+
+        assert "no_such_dir/file.py" in packet["target_files"]
+
+    def test_absolute_path_new_file_no_writable_ancestor_rejected(self, tmp_path: Path, monkeypatch) -> None:
+        _configure_loop_paths(monkeypatch, tmp_path)
+        missing = tmp_path / "no_such_dir" / "file.py"
+
+        task_card = {
+            "goal": "test",
+            "in_scope": [str(missing)],
+            "acceptance_criteria": [],
+            "constraints": [],
+        }
+
+        def _deny_write(path, mode) -> bool:
+            return False
+
+        monkeypatch.setattr(os, "access", _deny_write)
 
         packet = orchestrator._build_task_packet(task_card, 1)
 
