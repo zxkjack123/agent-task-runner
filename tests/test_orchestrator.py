@@ -11286,6 +11286,23 @@ class TestBuildTaskPacket:
 
         assert packet["target_files"] == []
 
+    def test_absolute_path_file_ancestor_rejected(self, tmp_path: Path, monkeypatch) -> None:
+        _configure_loop_paths(monkeypatch, tmp_path)
+        existing_file = tmp_path / "existing.txt"
+        existing_file.write_text("x", encoding="utf-8")
+        missing = existing_file / "sub" / "file.py"
+
+        task_card = {
+            "goal": "test",
+            "in_scope": [str(missing)],
+            "acceptance_criteria": [],
+            "constraints": [],
+        }
+
+        packet = orchestrator._build_task_packet(task_card, 1)
+
+        assert packet["target_files"] == []
+
     def test_relative_path_semantics_unchanged(self, tmp_path: Path, monkeypatch) -> None:
         _configure_loop_paths(monkeypatch, tmp_path)
         src = tmp_path / "src"
@@ -11302,6 +11319,27 @@ class TestBuildTaskPacket:
         packet = orchestrator._build_task_packet(task_card, 1)
 
         assert packet["target_files"] == ["src/keep.py"]
+
+    def test_relative_path_semantics_preserved_after_absolute_change(self, tmp_path: Path, monkeypatch) -> None:
+        _configure_loop_paths(monkeypatch, tmp_path)
+        src = tmp_path / "src"
+        src.mkdir(parents=True)
+        (src / "keep.py").write_text("def keep(): pass\n", encoding="utf-8")
+        (src / "existing.py").write_text("def existing(): pass\n", encoding="utf-8")
+
+        task_card = {
+            "goal": "test",
+            "in_scope": ["src/keep.py", "src/existing.py", "src/missing.py", "../outside.py"],
+            "acceptance_criteria": [],
+            "constraints": [],
+        }
+
+        packet = orchestrator._build_task_packet(task_card, 1)
+
+        # Existing relative paths are still matched; the non-existent relative
+        # path is NOT admitted (no new-file allowance for relative paths) and
+        # the traversal pattern is still rejected.
+        assert packet["target_files"] == ["src/keep.py", "src/existing.py"]
 
     def test_ignores_symlinked_match_outside_repo_root(self, tmp_path: Path, monkeypatch) -> None:
         _configure_loop_paths(monkeypatch, tmp_path)

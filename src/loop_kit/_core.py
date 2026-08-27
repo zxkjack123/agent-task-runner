@@ -5454,17 +5454,20 @@ _function_index_cache: tuple[tuple[int, float], str] | None = None
 def _is_safe_scope_pattern(pattern: str) -> bool:
     candidate = Path(pattern)
     if candidate.is_absolute():
-        # Absolute paths are safe only when the target itself — or, when the
-        # target does not yet exist, its nearest existing ancestor directory —
-        # exists and is writable by the current user. If no ancestor directory
-        # exists, the path is rejected.
+        # Absolute paths are safe only when the target itself exists and is
+        # writable by the current user, or when the target does not yet exist
+        # and its nearest existing ancestor directory is writable. If no
+        # ancestor directory exists, the path is rejected.
         try:
-            check_path = candidate
-            while not check_path.exists() and check_path != check_path.parent:
-                check_path = check_path.parent
-            if not check_path.exists():
-                return False
-            return os.access(check_path, os.W_OK)
+            if candidate.exists():
+                # Existing target: must itself be writable.
+                return os.access(candidate, os.W_OK)
+            # Non-existent target: walk up to the nearest existing ancestor,
+            # which must be a directory (never a file) and be writable.
+            ancestor = candidate.parent
+            while not ancestor.exists() and ancestor != ancestor.parent:
+                ancestor = ancestor.parent
+            return ancestor.exists() and ancestor.is_dir() and os.access(ancestor, os.W_OK)
         except OSError:
             return False
     return all(part != ".." for part in candidate.parts)
