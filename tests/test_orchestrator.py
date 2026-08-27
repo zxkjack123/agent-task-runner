@@ -11180,6 +11180,94 @@ class TestBuildTaskPacket:
 
         assert packet["target_files"] == ["src/main.py"]
 
+    def test_absolute_path_writable_in_scope(self, tmp_path: Path, monkeypatch) -> None:
+        _configure_loop_paths(monkeypatch, tmp_path)
+        outside = tmp_path / "external.py"
+        outside.write_text("def f(): pass\n", encoding="utf-8")
+
+        task_card = {
+            "goal": "test",
+            "in_scope": [str(outside)],
+            "acceptance_criteria": [],
+            "constraints": [],
+        }
+
+        packet = orchestrator._build_task_packet(task_card, 1)
+
+        assert "external.py" in packet["target_files"]
+
+    def test_absolute_path_outside_repo_root_writable(self, tmp_path: Path, monkeypatch) -> None:
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _configure_loop_paths(monkeypatch, repo)
+        outside = tmp_path / "outside.py"
+        outside.write_text("def f(): pass\n", encoding="utf-8")
+
+        task_card = {
+            "goal": "test",
+            "in_scope": [str(outside)],
+            "acceptance_criteria": [],
+            "constraints": [],
+        }
+
+        packet = orchestrator._build_task_packet(task_card, 1)
+
+        assert str(outside) in packet["target_files"]
+
+    def test_absolute_path_readonly_rejected(self, tmp_path: Path, monkeypatch) -> None:
+        _configure_loop_paths(monkeypatch, tmp_path)
+        readonly = tmp_path / "readonly.py"
+        readonly.write_text("def f(): pass\n", encoding="utf-8")
+        readonly.chmod(0o444)
+        try:
+            if os.access(readonly, os.W_OK):
+                pytest.skip("Running as root; write-permission test not meaningful")
+
+            task_card = {
+                "goal": "test",
+                "in_scope": [str(readonly)],
+                "acceptance_criteria": [],
+                "constraints": [],
+            }
+
+            packet = orchestrator._build_task_packet(task_card, 1)
+
+            assert packet["target_files"] == []
+        finally:
+            readonly.chmod(0o644)
+
+    def test_absolute_path_missing_parent_rejected(self, tmp_path: Path, monkeypatch) -> None:
+        _configure_loop_paths(monkeypatch, tmp_path)
+        missing = tmp_path / "no_such_dir" / "file.py"
+
+        task_card = {
+            "goal": "test",
+            "in_scope": [str(missing)],
+            "acceptance_criteria": [],
+            "constraints": [],
+        }
+
+        packet = orchestrator._build_task_packet(task_card, 1)
+
+        assert packet["target_files"] == []
+
+    def test_relative_path_semantics_unchanged(self, tmp_path: Path, monkeypatch) -> None:
+        _configure_loop_paths(monkeypatch, tmp_path)
+        src = tmp_path / "src"
+        src.mkdir(parents=True)
+        (src / "keep.py").write_text("def keep(): pass\n", encoding="utf-8")
+
+        task_card = {
+            "goal": "test",
+            "in_scope": ["src/keep.py", "../outside.py"],
+            "acceptance_criteria": [],
+            "constraints": [],
+        }
+
+        packet = orchestrator._build_task_packet(task_card, 1)
+
+        assert packet["target_files"] == ["src/keep.py"]
+
     def test_ignores_symlinked_match_outside_repo_root(self, tmp_path: Path, monkeypatch) -> None:
         _configure_loop_paths(monkeypatch, tmp_path)
         src = tmp_path / "src"

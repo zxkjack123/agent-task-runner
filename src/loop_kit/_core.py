@@ -5454,7 +5454,14 @@ _function_index_cache: tuple[tuple[int, float], str] | None = None
 def _is_safe_scope_pattern(pattern: str) -> bool:
     candidate = Path(pattern)
     if candidate.is_absolute():
-        return False
+        # Absolute paths are safe only when the target itself — or, when the
+        # target does not yet exist, its nearest existing parent — exists and is
+        # writable by the current user.
+        try:
+            check_path = candidate if candidate.exists() else candidate.parent
+            return check_path.exists() and os.access(check_path, os.W_OK)
+        except OSError:
+            return False
     return all(part != ".." for part in candidate.parts)
 
 
@@ -5479,6 +5486,26 @@ def _build_task_packet(task_card: TaskCard, round_num: int, paths: LoopPaths | N
         if not _is_safe_scope_pattern(pattern):
             _log(f"Ignoring unsafe in_scope pattern: {item!r}")
             continue
+
+        # Absolute path patterns resolve directly (no glob). Writability was
+        # already verified by _is_safe_scope_pattern.
+        if Path(pattern).is_absolute():
+            try:
+                resolved = Path(pattern).resolve()
+            except (OSError, RuntimeError):
+                _log(f"Ignoring unreadable in_scope path: {item!r}")
+                continue
+            if not resolved.is_file():
+                continue
+            try:
+                matched_path = resolved.relative_to(root_resolved).as_posix()
+            except ValueError:
+                matched_path = resolved.as_posix()
+            if matched_path not in seen_target_files:
+                target_files.append(matched_path)
+                seen_target_files.add(matched_path)
+            continue
+
         try:
             glob_matched = [p for p in ROOT.glob(pattern) if p.is_file() and _is_path_under_root(p, root_resolved)]
         except (RuntimeError, OSError, ValueError):
