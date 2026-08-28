@@ -128,6 +128,7 @@ class WorkReport(TypedDict):
     head_sha: str
     round: int
     files_changed: NotRequired[list[str]]
+    output_files: NotRequired[list[str]]
     tests: NotRequired[list[WorkReportTest]]
     notes: NotRequired[str]
     lane_id: NotRequired[str]
@@ -8799,6 +8800,7 @@ def _validate_report(
         prefix = "work_report"
         known_keys: frozenset[str] = frozenset({
             "task_id", "run_id", "head_sha", "round", "files_changed",
+            "output_files",
             "tests", "notes", "lane_id", "status", "backend",
             "duration_ms", "input_tokens", "output_tokens", "total_tokens",
             "cost_cents", "lane_metrics", "merge_provenance",
@@ -8837,7 +8839,7 @@ def _validate_report(
             return f"{prefix} field '{field_name}' must be non-empty"
 
     if schema == "work_report":
-        for list_field in ("files_changed", "tests", "lane_metrics"):
+        for list_field in ("files_changed", "output_files", "tests", "lane_metrics"):
             if list_field in report and not isinstance(report[list_field], list):
                 return f"{prefix} field '{list_field}' must be a list, got {type(report[list_field]).__name__}"
         for text_field in ("lane_id", "status", "backend"):
@@ -12823,6 +12825,74 @@ def _resolve_noop_evidence(
     return _noop_evidence_from_round_details(state, round_num, run_id)
 
 
+def _git_toplevel() -> Path:
+    """Best-effort git repository root; falls back to ``ROOT`` when unavailable."""
+    try:
+        toplevel = _git("rev-parse", "--show-toplevel")
+    except (RuntimeError, ValidationError):
+        return ROOT
+    try:
+        return Path(toplevel).resolve(strict=False)
+    except OSError:
+        return Path(toplevel)
+
+
+def _resolve_external_output_evidence(
+    work: WorkReport,
+    paths: LoopPaths | None = None,
+) -> dict | None:
+    """Verify out-of-repo ``output_files`` as current-round change evidence.
+
+    A worker may produce artifacts outside the repository (reports, generated
+    data, etc.) that ``git diff`` cannot see. Such files still represent real
+    work, so a round that otherwise looks like a noop must not be judged as one
+    when declared output files actually exist on disk.
+
+    In-repo entries are ignored here — they are already accounted for through
+    ``files_changed`` / git diff. Declared-but-missing entries are skipped with
+    a warning and never count as evidence.
+    """
+    resolved_paths = _resolve_paths(paths)
+    raw_output_files = work.get("output_files")
+    if not isinstance(raw_output_files, list):
+        return None
+    entries = [entry for entry in raw_output_files if isinstance(entry, str) and entry.strip()]
+    if not entries:
+        return None
+    repo_root = _git_toplevel()
+    verified: list[str] = []
+    for raw in entries:
+        candidate = Path(raw)
+        if not candidate.is_absolute():
+            candidate = ROOT / candidate
+        try:
+            resolved = candidate.resolve(strict=False)
+        except OSError:
+            resolved = candidate
+        try:
+            resolved.relative_to(repo_root)
+        except ValueError:
+            pass
+        else:
+            # In-repo file: handled by git diff accounting, not external evidence.
+            continue
+        if resolved.is_file():
+            verified.append(str(resolved))
+        else:
+            _log(
+                "Warning: declared output_files entry does not exist; "
+                f"ignored (not evidence): {raw}",
+                paths=resolved_paths,
+            )
+    if not verified:
+        return None
+    return {
+        "source": "external_output_files",
+        "detail": "verified out-of-repo output files: " + ", ".join(verified),
+        "files": verified,
+    }
+
+
 def _single_round_handle_worker_noop(
     state: dict,
     work: WorkReport,
@@ -12841,11 +12911,13 @@ def _single_round_handle_worker_noop(
         "Worker reported no code changes after immutable ref resolution: "
         f"head_sha == base_sha ({head_sha}). task_id={task_id} round={round_num}"
     )
-    evidence = (
+    external_evidence = _resolve_external_output_evidence(work, resolved_paths)
+    historical_evidence = (
         _resolve_noop_evidence(state, task_id, round_num, run_id, resolved_paths)
         if (config.worker_noop_as_error and config.worker_noop_evidence_gating)
         else None
     )
+    evidence = external_evidence or historical_evidence
     take_success = (not config.worker_noop_as_error) or evidence is not None
     round_detail = {
         "round": round_num,

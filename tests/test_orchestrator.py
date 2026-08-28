@@ -5457,6 +5457,193 @@ def test_single_round_no_change_round_details_cross_run_approve_is_success(tmp_p
     assert summary["round_details"][-1]["no_change_evidence"]["source"] == "round_details"
 
 
+# ── T-3129: out-of-repo output_files as change evidence ─────────────────────
+
+
+def test_single_round_no_change_with_external_output_files_is_success(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # Use case A: declared out-of-repo output_files that exist → success, not noop.
+    _configure_loop_paths(monkeypatch, tmp_path)
+
+    task_path = tmp_path / "task_input.json"
+    task_path.write_text(
+        json.dumps({"task_id": "T-604", "goal": "external output files"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    orchestrator.STATE_FILE.write_text(
+        json.dumps(_noop_state_payload(round_num=1), ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(orchestrator, "_git_toplevel", lambda: repo_root)
+    external_file = tmp_path / "outside_artifact.txt"
+    external_file.write_text("artifact payload", encoding="utf-8")
+
+    def fake_wait(path: Path, description: str, **kwargs) -> dict | None:
+        _ = (description, kwargs)
+        if path == orchestrator.WORK_REPORT:
+            return {
+                "task_id": "T-604",
+                "round": 1,
+                "head_sha": "head-ref",
+                "files_changed": [],
+                "output_files": [str(external_file)],
+                "tests": [],
+                "notes": "produced an out-of-repo artifact",
+            }
+        if path == orchestrator.REVIEW_REPORT:
+            raise AssertionError("reviewer should not run when external evidence exists")
+        return None
+
+    monkeypatch.setattr(orchestrator, "_wait_for_file", fake_wait)
+    monkeypatch.setattr(orchestrator, "_is_git_repo_root", lambda _path: True)
+    monkeypatch.setattr(
+        orchestrator,
+        "_resolve_commit_oid",
+        lambda ref: {"base-ref": "same-oid", "head-ref": "same-oid", "same-oid": "same-oid"}[ref],
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_diff",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("diff should not run")),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_log_oneline",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("log should not run")),
+    )
+
+    orchestrator.cmd_run(
+        _run_config(str(task_path), allow_dirty=True),
+        single_round=True,
+        round_num=1,
+    )
+
+    state = json.loads(orchestrator.STATE_FILE.read_text(encoding="utf-8"))
+    summary = json.loads((orchestrator.LOOP_DIR / "summary.json").read_text(encoding="utf-8"))
+    assert state["outcome"] == "no_change_success"
+    assert summary["round_details"][-1]["no_change_evidence"]["source"] == "external_output_files"
+    assert summary["round_details"][-1]["review_decision"] == "skipped_no_change_evidence"
+    assert (orchestrator.LOOP_DIR / "review_request.json").exists() is False
+
+
+def test_single_round_no_change_empty_output_files_still_fails(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # Use case B: real noop (no diff, no usable output_files) still fails.
+    _configure_loop_paths(monkeypatch, tmp_path)
+
+    task_path = tmp_path / "task_input.json"
+    task_path.write_text(
+        json.dumps({"task_id": "T-604", "goal": "empty output files"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    orchestrator.STATE_FILE.write_text(
+        json.dumps(_noop_state_payload(round_num=1), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(orchestrator, "_git_toplevel", lambda: tmp_path / "repo")
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_wait_for_file",
+        lambda path, description, **kwargs: (
+            {
+                "task_id": "T-604",
+                "round": 1,
+                "head_sha": "head-ref",
+                "files_changed": [],
+                "output_files": [],
+                "tests": [],
+                "notes": "noop",
+            }
+            if path == orchestrator.WORK_REPORT
+            else None
+        ),
+    )
+    monkeypatch.setattr(orchestrator, "_is_git_repo_root", lambda _path: True)
+    monkeypatch.setattr(
+        orchestrator,
+        "_resolve_commit_oid",
+        lambda ref: {"base-ref": "same-oid", "head-ref": "same-oid", "same-oid": "same-oid"}[ref],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        orchestrator.cmd_run(
+            _run_config(str(task_path), allow_dirty=True),
+            single_round=True,
+            round_num=1,
+        )
+
+    assert exc.value.code == 3
+    state = json.loads(orchestrator.STATE_FILE.read_text(encoding="utf-8"))
+    assert state["outcome"] == "validation_failure"
+    assert "no code changes" in state["error"]
+
+
+def test_single_round_no_change_missing_output_files_ignored_with_warning(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    # Use case C: declared-but-missing output_files are ignored with a warning;
+    # no crash and no false success.
+    _configure_loop_paths(monkeypatch, tmp_path)
+
+    task_path = tmp_path / "task_input.json"
+    task_path.write_text(
+        json.dumps({"task_id": "T-604", "goal": "missing output files"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    orchestrator.STATE_FILE.write_text(
+        json.dumps(_noop_state_payload(round_num=1), ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(orchestrator, "_git_toplevel", lambda: repo_root)
+    missing_file = tmp_path / "missing_artifact.txt"
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_wait_for_file",
+        lambda path, description, **kwargs: (
+            {
+                "task_id": "T-604",
+                "round": 1,
+                "head_sha": "head-ref",
+                "files_changed": [],
+                "output_files": [str(missing_file)],
+                "tests": [],
+                "notes": "claims an artifact that does not exist",
+            }
+            if path == orchestrator.WORK_REPORT
+            else None
+        ),
+    )
+    monkeypatch.setattr(orchestrator, "_is_git_repo_root", lambda _path: True)
+    monkeypatch.setattr(
+        orchestrator,
+        "_resolve_commit_oid",
+        lambda ref: {"base-ref": "same-oid", "head-ref": "same-oid", "same-oid": "same-oid"}[ref],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        orchestrator.cmd_run(
+            _run_config(str(task_path), allow_dirty=True),
+            single_round=True,
+            round_num=1,
+        )
+
+    assert exc.value.code == 3
+    state = json.loads(orchestrator.STATE_FILE.read_text(encoding="utf-8"))
+    assert state["outcome"] == "validation_failure"
+    captured = capsys.readouterr()
+    assert "declared output_files entry does not exist" in captured.out
+
+
 def test_main_run_parses_worker_noop_evidence_gating_flags(monkeypatch) -> None:
     captured: dict[str, bool] = {}
 
