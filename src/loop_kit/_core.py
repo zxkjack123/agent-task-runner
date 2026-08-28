@@ -5556,10 +5556,10 @@ def _build_task_packet(task_card: TaskCard, round_num: int, paths: LoopPaths | N
         else:
             try:
                 resolved = (ROOT / pattern).resolve()
-            except OSError:
-                _log(f"Ignoring unreadable in_scope path: {item!r}")
-                continue
-            if not resolved.is_file():
+                if not resolved.is_file():
+                    continue
+            except (OSError, ValueError):
+                _log(f"Ignoring invalid in_scope pattern: {item!r}")
                 continue
             if not resolved.is_relative_to(root_resolved):
                 _log(f"Ignoring in_scope path outside repo root: {item!r}")

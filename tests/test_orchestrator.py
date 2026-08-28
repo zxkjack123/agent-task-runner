@@ -11163,6 +11163,38 @@ class TestBuildTaskPacket:
 
         assert "src/main.py" in packet["target_files"]
 
+    def test_in_scope_super_long_text_pattern_ignored(self, tmp_path: Path, monkeypatch) -> None:
+        _configure_loop_paths(monkeypatch, tmp_path)
+
+        long_pattern = "x" * 5000
+
+        task_card = {
+            "goal": "test",
+            "in_scope": [long_pattern],
+            "acceptance_criteria": [],
+            "constraints": [],
+        }
+
+        packet = orchestrator._build_task_packet(task_card, 1)
+
+        assert packet["target_files"] == []
+
+    def test_in_scope_valid_absolute_path_still_resolves(self, tmp_path: Path, monkeypatch) -> None:
+        _configure_loop_paths(monkeypatch, tmp_path)
+        outside = tmp_path / "external.py"
+        outside.write_text("def f(): pass\n", encoding="utf-8")
+
+        task_card = {
+            "goal": "test",
+            "in_scope": [str(outside), "x" * 5000],
+            "acceptance_criteria": [],
+            "constraints": [],
+        }
+
+        packet = orchestrator._build_task_packet(task_card, 1)
+
+        assert "external.py" in packet["target_files"]
+
     def test_ignores_unsafe_in_scope_patterns(self, tmp_path: Path, monkeypatch) -> None:
         _configure_loop_paths(monkeypatch, tmp_path)
         src = tmp_path / "src"
