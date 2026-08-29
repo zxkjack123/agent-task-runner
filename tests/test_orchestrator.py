@@ -6345,6 +6345,255 @@ def test_load_task_card_rejects_lane_owner_paths_overlap(tmp_path: Path, capsys)
     assert "owner_paths overlap across lanes" in capsys.readouterr().err
 
 
+class TestTaskCardContractValidation:
+    """Task-card load-time contract validation (T-3149).
+
+    Malformed cards must fail fast with a clear message naming the violating
+    item and reason; valid cards must load with zero behavior change.
+    """
+
+    def test_load_task_card_rejects_free_text_in_scope(self, tmp_path: Path, capsys) -> None:
+        task_path = tmp_path / "task_input.json"
+        task_path.write_text(
+            json.dumps(
+                {
+                    "task_id": "T-900",
+                    "goal": "contract validation",
+                    "in_scope": ["src/loop_kit/_core.py", "fix the bug in the parser"],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        with pytest.raises(SystemExit) as exc:
+            orchestrator._load_task_card(str(task_path))
+
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "task card contract violation" in err
+        assert "fix the bug in the parser" in err
+        assert "not a path-shaped pattern" in err
+
+    def test_load_task_card_rejects_newline_in_scope(self, tmp_path: Path, capsys) -> None:
+        task_path = tmp_path / "task_input.json"
+        task_path.write_text(
+            json.dumps(
+                {
+                    "task_id": "T-900",
+                    "goal": "contract validation",
+                    "in_scope": ["src/loop_kit/_core.py\nrm -rf /"],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        with pytest.raises(SystemExit) as exc:
+            orchestrator._load_task_card(str(task_path))
+
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "task card contract violation" in err
+        assert "contains a newline character" in err
+
+    def test_load_task_card_rejects_overlong_in_scope_pattern(self, tmp_path: Path, capsys) -> None:
+        long_pattern = "x" * 600
+        task_path = tmp_path / "task_input.json"
+        task_path.write_text(
+            json.dumps(
+                {"task_id": "T-900", "goal": "contract validation", "in_scope": [long_pattern]},
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        with pytest.raises(SystemExit) as exc:
+            orchestrator._load_task_card(str(task_path))
+
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "task card contract violation" in err
+        assert "length 600 exceeds maximum 512" in err
+
+    def test_load_task_card_rejects_missing_task_id(self, tmp_path: Path, capsys) -> None:
+        task_path = tmp_path / "task_input.json"
+        task_path.write_text(
+            json.dumps({"goal": "contract validation", "in_scope": ["src/loop_kit/_core.py"]}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        with pytest.raises(SystemExit) as exc:
+            orchestrator._load_task_card(str(task_path))
+
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "task card contract violation" in err
+        assert "missing required field 'task_id'" in err
+
+    def test_load_task_card_rejects_missing_goal(self, tmp_path: Path, capsys) -> None:
+        task_path = tmp_path / "task_input.json"
+        task_path.write_text(
+            json.dumps({"task_id": "T-900", "in_scope": ["src/loop_kit/_core.py"]}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        with pytest.raises(SystemExit) as exc:
+            orchestrator._load_task_card(str(task_path))
+
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "task card contract violation" in err
+        assert "missing required field 'goal'" in err
+
+    def test_load_task_card_rejects_in_scope_non_list(self, tmp_path: Path, capsys) -> None:
+        task_path = tmp_path / "task_input.json"
+        task_path.write_text(
+            json.dumps(
+                {
+                    "task_id": "T-900",
+                    "goal": "contract validation",
+                    "in_scope": "src/loop_kit/_core.py",
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        with pytest.raises(SystemExit) as exc:
+            orchestrator._load_task_card(str(task_path))
+
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "task card contract violation" in err
+        assert "field 'in_scope' must be a list" in err
+
+    def test_load_task_card_reports_all_violations_mixed_scenario(self, tmp_path: Path, capsys) -> None:
+        task_path = tmp_path / "task_input.json"
+        task_path.write_text(
+            json.dumps(
+                {
+                    "in_scope": ["fix the bug in the parser", "x" * 600],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        with pytest.raises(SystemExit) as exc:
+            orchestrator._load_task_card(str(task_path))
+
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "task card contract violation" in err
+        assert "missing required field 'task_id'" in err
+        assert "missing required field 'goal'" in err
+        assert "not a path-shaped pattern" in err
+        assert "length 600 exceeds maximum 512" in err
+
+    def test_load_task_card_accepts_valid_card_without_behavior_change(self, tmp_path: Path) -> None:
+        task_path = tmp_path / "task_input.json"
+        task_path.write_text(
+            json.dumps(
+                {
+                    "task_id": "T-900",
+                    "goal": "contract validation",
+                    "in_scope": ["src/loop_kit/_core.py", "tests/test_orchestrator.py"],
+                    "out_of_scope": ["docs"],
+                    "acceptance_criteria": ["tests pass"],
+                    "constraints": ["no new deps"],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        _, task_card, task_id = orchestrator._load_task_card(str(task_path))
+
+        assert task_id == "T-900"
+        assert task_card["goal"] == "contract validation"
+        assert task_card["in_scope"] == ["src/loop_kit/_core.py", "tests/test_orchestrator.py"]
+
+    def test_load_task_card_accepts_absent_in_scope(self, tmp_path: Path) -> None:
+        task_path = tmp_path / "task_input.json"
+        task_path.write_text(
+            json.dumps({"task_id": "T-900", "goal": "no scope", "depends_on": ["T-901"]}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        _, task_card, task_id = orchestrator._load_task_card(str(task_path))
+
+        assert task_id == "T-900"
+        assert "in_scope" not in task_card
+
+
+class TestStaleRunArtifactDetection:
+    """Stale run-artifact detection before single-round startup (T-3149)."""
+
+    def _write_summary(self, loop_dir: Path, run_id: str) -> None:
+        (loop_dir / "summary.json").write_text(
+            json.dumps({"task_id": "T-1", "run_id": run_id, "outcome": "approved"}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+    def test_detect_stale_flags_old_run_id(self, tmp_path: Path, monkeypatch) -> None:
+        _configure_loop_paths(monkeypatch, tmp_path)
+        loop_dir = tmp_path / ".loop"
+        self._write_summary(loop_dir, "run-old")
+
+        stale = orchestrator._detect_stale_run_artifacts({}, paths=orchestrator._resolve_paths())
+
+        assert any("summary.json" in entry and "run-old" in entry for entry in stale)
+
+    def test_detect_stale_ignores_matching_run_id(self, tmp_path: Path, monkeypatch) -> None:
+        _configure_loop_paths(monkeypatch, tmp_path)
+        loop_dir = tmp_path / ".loop"
+        self._write_summary(loop_dir, "run-current")
+
+        stale = orchestrator._detect_stale_run_artifacts(
+            {"run_id": "run-current"},
+            paths=orchestrator._resolve_paths(),
+        )
+
+        assert stale == []
+
+    def test_fail_on_stale_artifacts_raises_with_cleanup_hint(self, tmp_path: Path, monkeypatch) -> None:
+        _configure_loop_paths(monkeypatch, tmp_path)
+        loop_dir = tmp_path / ".loop"
+        self._write_summary(loop_dir, "run-old")
+        (loop_dir / "work_report.json").write_text(
+            json.dumps({"task_id": "T-1", "run_id": "run-old", "round": 1}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        with pytest.raises(orchestrator.ValidationError, match="run --reset") as exc:
+            orchestrator._fail_on_stale_run_artifacts({}, paths=orchestrator._resolve_paths())
+
+        message = str(exc.value)
+        assert "summary.json" in message
+        assert "work_report.json" in message
+        assert "run-old" in message
+
+    def test_run_single_round_fails_fast_on_stale_artifact(self, tmp_path: Path, monkeypatch) -> None:
+        _configure_loop_paths(monkeypatch, tmp_path)
+        loop_dir = tmp_path / ".loop"
+        card = loop_dir / "task_card.json"
+        card.write_text(
+            json.dumps({"task_id": "T-1", "goal": "g", "in_scope": ["src/foo.py"]}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        self._write_summary(loop_dir, "run-old")
+        config = _run_config(str(card))
+
+        with pytest.raises(orchestrator.ValidationError, match="run --reset"):
+            orchestrator._run_single_round(
+                config=config,
+                round_num=1,
+                single_round=True,
+                paths=orchestrator._resolve_paths(),
+            )
+
+
 def test_dependency_snapshot_ready_when_dependencies_done(tmp_path: Path, monkeypatch) -> None:
     _configure_loop_paths(monkeypatch, tmp_path)
     task_path = tmp_path / "task_input.json"

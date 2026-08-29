@@ -438,6 +438,7 @@ _DISPATCH_PHASE_METRIC_NAMES = ("startup_ms", "context_to_work_ms", "work_to_art
 _DISPATCH_SUBPHASE_NAMES = ("read", "search", "edit", "test", "unknown")
 _DISPATCH_SUBPHASE_METRIC_NAMES = tuple(f"{name}_ms" for name in _DISPATCH_SUBPHASE_NAMES)
 _ROUND_ARTIFACT_NAMES = ("state", "work_report", "review_report")
+_MAX_IN_SCOPE_PATTERN_LENGTH = 512
 EXIT_OK = 0
 EXIT_GENERAL_ERROR = 1
 EXIT_TIMEOUT = 2
@@ -902,6 +903,65 @@ def _enforce_artifact_identity(
             f"{artifact_label} field 'run_id' mismatch: expected {expected_run_id!r}, got {actual_run_id!r}"
         )
     return cast(dict[str, object], payload)
+
+
+def _artifact_run_id(path: Path) -> str | None:
+    """Return the run_id stored in a run artifact, or None when unreadable.
+
+    Never raises: unreadable/corrupt/oversized artifacts are treated as having
+    no identifiable run_id so the caller can decide how to handle them.
+    """
+    try:
+        payload = _load_json_with_limit(path, label=path.name)
+    except (ConfigError, json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return _normalize_run_id(payload.get("run_id"))
+
+
+def _detect_stale_run_artifacts(state: dict, *, paths: LoopPaths | None = None) -> list[str]:
+    """Return descriptions of stale run artifacts left in the loop dir.
+
+    A run artifact (summary/work_report/review_report) is stale when it carries
+    a ``run_id`` that does not match the current run (``state['run_id']``). A
+    fresh run — no run_id in state yet — treats any run_id-bearing artifact as
+    stale, since the loop dir should be clean before a new run starts.
+    """
+    resolved = _resolve_paths(paths)
+    state_run_id = _normalize_run_id(state.get("run_id"))
+    stale: list[str] = []
+    for name, path in (
+        ("summary.json", resolved.summary),
+        ("work_report.json", resolved.work_report),
+        ("review_report.json", resolved.review_report),
+    ):
+        if not path.exists():
+            continue
+        artifact_run_id = _artifact_run_id(path)
+        if artifact_run_id is None:
+            continue
+        if state_run_id is not None and artifact_run_id == state_run_id:
+            continue
+        stale.append(f"{name} (run_id={artifact_run_id!r})")
+    return stale
+
+
+def _fail_on_stale_run_artifacts(state: dict, *, paths: LoopPaths | None = None) -> None:
+    """Fail fast when the loop dir contains stale run artifacts.
+
+    Raises :class:`ValidationError` (no bare OSError/traceback) with a message
+    naming the stale artifacts and suggesting how to clean them.
+    """
+    stale = _detect_stale_run_artifacts(state, paths=paths)
+    if not stale:
+        return
+    raise ValidationError(
+        "stale run artifacts detected in loop dir: "
+        + ", ".join(stale)
+        + ". Clean them before starting a new run — run `loop run --reset`, "
+        + "or delete the stale files and re-run."
+    )
 
 
 def _archive_bus_file(
@@ -8095,6 +8155,66 @@ def _resolve_task_card_path_by_id(task_id: str, *, paths: LoopPaths | None = Non
     return None
 
 
+def _is_path_shaped(pattern: str) -> bool:
+    """Return True when a string looks like a filesystem path or glob pattern.
+
+    A path-shaped pattern either contains a path separator (``/`` or ``\\``),
+    contains a glob metacharacter (``*``, ``?``, ``[``), or is a whitespace-free
+    token (bare filename or directory). Free-text prose — whitespace with no
+    path separator and no glob metacharacter — is rejected.
+    """
+    if not pattern.strip():
+        return False
+    if "/" in pattern or "\\" in pattern:
+        return True
+    if any(ch in pattern for ch in "*?["):
+        return True
+    return not any(ch.isspace() for ch in pattern)
+
+
+def _in_scope_pattern_violation(item: str) -> str | None:
+    """Return a reason string when an in_scope item violates the path contract."""
+    if "\n" in item or "\r" in item:
+        return "contains a newline character"
+    if len(item) > _MAX_IN_SCOPE_PATTERN_LENGTH:
+        return f"length {len(item)} exceeds maximum {_MAX_IN_SCOPE_PATTERN_LENGTH}"
+    if not _is_path_shaped(item):
+        return "is not a path-shaped pattern (expected a path or glob, not free text)"
+    return None
+
+
+def _validate_task_card_contract(task_card: TaskCard) -> None:
+    """Validate the task card contract at load time.
+
+    Raises :class:`ConfigError` with a combined message listing every
+    violating item and its reason when the card is malformed. A valid card
+    leaves this function as a no-op (zero behavior change).
+    """
+    problems: list[str] = []
+    task_id = task_card.get("task_id")
+    if not isinstance(task_id, str) or not task_id.strip():
+        problems.append("missing required field 'task_id'")
+    goal = task_card.get("goal")
+    if not isinstance(goal, str) or not goal.strip():
+        problems.append("missing required field 'goal'")
+    in_scope_raw = task_card.get("in_scope")
+    if in_scope_raw is not None:
+        if not isinstance(in_scope_raw, list):
+            problems.append("field 'in_scope' must be a list of path patterns")
+        else:
+            for item in in_scope_raw:
+                if not isinstance(item, str):
+                    problems.append(f"in_scope item {item!r} must be a string")
+                    continue
+                if not item.strip():
+                    continue
+                violation = _in_scope_pattern_violation(item)
+                if violation is not None:
+                    problems.append(f"in_scope item {item!r}: {violation}")
+    if problems:
+        raise ConfigError("task card contract violation: " + "; ".join(problems))
+
+
 def _load_task_card_or_raise(task_path: str | Path) -> tuple[Path, TaskCard, str]:
     tp = Path(task_path)
     if not tp.exists():
@@ -8111,6 +8231,7 @@ def _load_task_card_or_raise(task_path: str | Path) -> tuple[Path, TaskCard, str
         raise ConfigError(f"task card must be a JSON object: {tp}")
 
     task_card_typed = cast(TaskCard, task_card_raw)
+    _validate_task_card_contract(task_card_typed)
     task_id_raw = task_card_typed.get("task_id", "UNKNOWN")
     task_id = str(task_id_raw).strip() if isinstance(task_id_raw, str) else str(task_id_raw)
     dependencies = _normalize_task_dependencies(task_card_typed, source=tp, task_id=task_id)
@@ -10998,6 +11119,7 @@ def _run_single_round(
     task_card, task_id_from_card = _sync_task_card_to_bus(config.task_path, round_num=round_num, paths=resolved_paths)
 
     state = _load_state(paths=resolved_paths)
+    _fail_on_stale_run_artifacts(state, paths=resolved_paths)
     run_id = _ensure_state_run_id(state)
     if round_num == 1:
         if not isinstance(state.get("task_id"), str) or not cast(str, state.get("task_id")).strip():
