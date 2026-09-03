@@ -392,6 +392,8 @@ FEED_HEARTBEAT = "heartbeat"
 FEED_STATE_TRANSITION = "state_transition"
 FEED_SESSION_BUDGET = "session_budget"
 FEED_SESSION_TIMEOUT = "session_timeout"
+FEED_CONTEXT_BUDGET = "context_budget"
+FEED_CONTEXT_BUDGET_EXCEEDED = "context_budget_exceeded"
 FEED_LANE_PLAN_STAGE = "lane_plan_stage"
 FEED_LOG = "log"
 FEED_TASK_ROUTE_POLICY_RETAIN = "retain"
@@ -2852,6 +2854,46 @@ def _session_budget_fields(
     }
 
 
+def _context_budget_report(
+    *,
+    observed_input: int | None,
+    observed_total: int | None,
+    prompt_chars: int | None,
+    budget: int,
+    warn_pct: int,
+) -> dict[str, object]:
+    """Pure context-token budget accounting (PM #3263, observation-only).
+
+    Compares cumulative observations against ``budget``; ``budget <= 0`` means
+    the ledger is disabled (exceeded/warned are always False). When real token
+    counts are unavailable the ledger falls back to ``prompt_chars`` as a
+    proxy and marks ``token_source="proxy"`` so upstream can distinguish
+    proxy vs report accounting.
+    """
+    exceeded = False
+    warned = False
+    token_source = "report"
+    comparator: int | None = observed_input
+    if comparator is None and prompt_chars is not None:
+        comparator = prompt_chars
+        token_source = "proxy"
+    if comparator is None:
+        token_source = "none"
+    elif budget > 0:
+        warn_threshold = budget * max(0, min(100, warn_pct)) / 100
+        exceeded = comparator > budget
+        warned = (not exceeded) and comparator >= warn_threshold
+    return {
+        "context_input_tokens_observed": observed_input,
+        "context_total_tokens_observed": observed_total,
+        "context_prompt_chars_observed": prompt_chars,
+        "context_budget": budget,
+        "context_budget_exceeded": exceeded,
+        "context_budget_warned": warned,
+        "token_source": token_source,
+    }
+
+
 def _report_dispatch_result(
     *,
     role: str,
@@ -3391,6 +3433,7 @@ def _run_auto_dispatch(
                     max_attempts=max_attempts,
                     timeout_sec=timeout_sec,
                     resume_requested=active_resume_session_id is not None,
+                    prompt_chars=len(prompt),
                     **attempt_budget_before,
                 ),
             )
@@ -12498,6 +12541,12 @@ def _run_multi_round_via_subprocess(
     # the deadline; absent -> watchdog disabled.
     session_deadline_at = _session_deadline_from_state(_load_state(paths=resolved_paths))
 
+    # PM #3263 context-token ledger: parent-process cumulative counters
+    # (observation-only, decision is left to upstream).
+    context_input_tokens_observed = 0
+    context_total_tokens_observed = 0
+    context_prompt_chars_observed = 0
+
     if resume_from_state is None:
         stale = _load_state(paths=resolved_paths)
         stale_state = stale.get("state")
@@ -12776,6 +12825,57 @@ def _run_multi_round_via_subprocess(
             review = cast(ReviewReport, review_data) if isinstance(review_data, dict) else None
             fix_list_data = _read_json_if_exists(resolved_paths.fix_list)
             fix_list = cast(FixList, fix_list_data) if isinstance(fix_list_data, dict) else None
+
+            # PM #3263 context-token ledger: accumulate from the work report
+            # written by the single-round child (token fields were normalized
+            # into it via _enrich_work_report_runtime_fields). Missing tokens
+            # fall back to a prompt-chars proxy so the ledger stays continuous.
+            if config.context_token_budget > 0:
+                work_report_data = _read_json_if_exists(resolved_paths.work_report)
+                round_input: int | None = None
+                round_total: int | None = None
+                if isinstance(work_report_data, dict):
+                    runtime_fields = _runtime_cost_and_token_fields(
+                        work_report_data, backend=config.worker_backend
+                    )
+                    round_input = runtime_fields.get("input_tokens")
+                    round_total = runtime_fields.get("total_tokens")
+                if round_input is not None:
+                    context_input_tokens_observed += round_input
+                if round_total is not None:
+                    context_total_tokens_observed += round_total
+                if round_total is None:
+                    context_prompt_chars_observed += len(stdout or "")
+                budget_report = _context_budget_report(
+                    observed_input=(context_input_tokens_observed or None),
+                    observed_total=(context_total_tokens_observed or None),
+                    prompt_chars=(context_prompt_chars_observed or None),
+                    budget=config.context_token_budget,
+                    warn_pct=config.context_token_warn_pct,
+                )
+                _feed_event(
+                    FEED_CONTEXT_BUDGET,
+                    data=_feed_data(
+                        task_id=task_id,
+                        round_num=round_num,
+                        role="orchestrator",
+                        **budget_report,
+                    ),
+                    paths=resolved_paths,
+                )
+                if budget_report["context_budget_exceeded"]:
+                    _feed_event(
+                        FEED_CONTEXT_BUDGET_EXCEEDED,
+                        level="error",
+                        data=_feed_data(
+                            task_id=task_id,
+                            round_num=round_num,
+                            role="orchestrator",
+                            **budget_report,
+                        ),
+                        paths=resolved_paths,
+                    )
+
             state = _load_state(paths=resolved_paths)
             normalized_state_name = _normalized_state_name_from_persisted(state)
 

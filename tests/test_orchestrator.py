@@ -14180,6 +14180,194 @@ class TestSessionWatchdog:
         assert any(d.get("timeout_class") == "session" for d in timeout_datas)
 
 
+class TestContextBudget:
+    """PM #3263 T1.3: context-token ledger + over-budget events (observation-only)."""
+
+    # ── ① pure-function boundaries ──
+
+    def test_context_budget_report_disabled_when_budget_zero(self) -> None:
+        report = orchestrator._context_budget_report(
+            observed_input=9999, observed_total=9999, prompt_chars=None, budget=0, warn_pct=80
+        )
+        assert report["context_budget_exceeded"] is False
+        assert report["context_budget_warned"] is False
+        assert report["token_source"] == "report"
+
+    def test_context_budget_report_warns_at_threshold(self) -> None:
+        report = orchestrator._context_budget_report(
+            observed_input=80, observed_total=100, prompt_chars=None, budget=100, warn_pct=80
+        )
+        assert report["context_budget_warned"] is True
+        assert report["context_budget_exceeded"] is False
+
+    def test_context_budget_report_exceeds_over_100pct(self) -> None:
+        report = orchestrator._context_budget_report(
+            observed_input=101, observed_total=101, prompt_chars=None, budget=100, warn_pct=80
+        )
+        assert report["context_budget_exceeded"] is True
+        assert report["context_budget_warned"] is False  # exceeded wins over warn
+
+    def test_context_budget_report_proxy_branch(self) -> None:
+        report = orchestrator._context_budget_report(
+            observed_input=None, observed_total=None, prompt_chars=1500, budget=1000, warn_pct=80
+        )
+        assert report["token_source"] == "proxy"
+        assert report["context_budget_exceeded"] is True
+        assert report["context_prompt_chars_observed"] == 1500
+
+    def test_context_budget_report_none_branch(self) -> None:
+        report = orchestrator._context_budget_report(
+            observed_input=None, observed_total=None, prompt_chars=None, budget=100, warn_pct=80
+        )
+        assert report["token_source"] == "none"
+        assert report["context_budget_exceeded"] is False
+
+    # ── ② + ③ + ④ T-3263-b: parent ledger across rounds (no termination) ──
+
+    def test_parent_ledger_accumulates_and_signals_budget_without_terminating(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        _configure_loop_paths(monkeypatch, tmp_path)
+        task_path = tmp_path / "task.json"
+        task_path.write_text(
+            json.dumps({"task_id": "T-CB-1", "goal": "ledger"}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        orchestrator._save_state(
+            {"state": orchestrator.STATE_IDLE, "round": 0, "task_id": "T-CB-1", "run_id": "run-cb-1"}
+        )
+        monkeypatch.setattr(orchestrator, "_enforce_clean_worktree_or_exit", lambda allow_dirty: None)
+        monkeypatch.setattr(orchestrator, "_current_sha", lambda: "base-sha")
+        monkeypatch.setattr(orchestrator, "_write_task_card_status", lambda *args, **kwargs: None)
+        monkeypatch.setattr(orchestrator, "_prepare_bus_file", lambda *args, **kwargs: None)
+        monkeypatch.setattr(orchestrator, "_archive_bus_file", lambda *args, **kwargs: None)
+
+        feed_events: list[tuple[str, str, dict]] = []
+        monkeypatch.setattr(
+            orchestrator,
+            "_feed_event",
+            lambda event, level="info", data=None, paths=None: feed_events.append((event, level, dict(data or {}))),
+        )
+
+        round_tokens = [
+            {"input_tokens": 150, "total_tokens": 200, "backend": "codex"},
+            {"input_tokens": 100, "total_tokens": 120, "backend": "codex"},
+            {"input_tokens": 100, "total_tokens": 120, "backend": "codex"},
+        ]
+        work_read_count = {"n": 0}
+
+        def fake_read_json(path, *args, **kwargs):
+            _ = (args, kwargs)
+            if Path(path).name == "work_report.json":
+                idx = min(work_read_count["n"], len(round_tokens) - 1)
+                work_read_count["n"] += 1
+                return dict(round_tokens[idx])
+            return None
+
+        monkeypatch.setattr(orchestrator, "_read_json_if_exists", fake_read_json)
+
+        popen_count = {"n": 0}
+
+        class _DoneProc:
+            returncode = 0
+
+            def poll(self):
+                return 0
+
+            def terminate(self):
+                raise AssertionError("ledger must never terminate a completed child")
+
+            def wait(self, timeout=None):
+                return 0
+
+        def fake_popen(*args, **kwargs):
+            _ = (args, kwargs)
+            popen_count["n"] += 1
+            return _DoneProc()
+
+        monkeypatch.setattr(orchestrator.subprocess, "Popen", fake_popen)
+        monkeypatch.setattr(
+            orchestrator,
+            "_collect_streamed_text_output",
+            lambda proc, *, stdout_line_callback=None: ("", "", 0),
+        )
+        monkeypatch.setattr(
+            orchestrator,
+            "_dispatch_post_round",
+            lambda state, round_num, normalized: orchestrator._post_round_handle_awaiting_next_round,
+        )
+
+        with pytest.raises(orchestrator.DispatchError, match="Max rounds exhausted"):
+            orchestrator._run_multi_round_via_subprocess(
+                config=orchestrator.RunConfig(
+                    task_path=str(task_path),
+                    max_rounds=3,
+                    allow_dirty=True,
+                    context_token_budget=300,
+                    context_token_warn_pct=80,
+                ),
+            )
+
+        assert popen_count["n"] == 3  # all three rounds dispatched, never terminated
+        context_events = [d for e, _lvl, d in feed_events if e == orchestrator.FEED_CONTEXT_BUDGET]
+        assert len(context_events) == 3
+        # cumulative ledger across rounds: 150 -> 250 -> 350
+        assert context_events[1]["context_input_tokens_observed"] == 250
+        assert context_events[2]["context_input_tokens_observed"] == 350
+        assert context_events[1]["context_budget_warned"] is True
+        assert context_events[2]["context_budget_exceeded"] is True
+        exceeded_events = [d for e, _lvl, d in feed_events if e == orchestrator.FEED_CONTEXT_BUDGET_EXCEEDED]
+        assert len(exceeded_events) == 1
+        assert exceeded_events[0]["context_budget_exceeded"] is True
+
+    # ── ④ prompt_chars recorded on dispatch start ──
+
+    def test_dispatch_start_records_prompt_chars(self, tmp_path: Path, monkeypatch) -> None:
+        _configure_loop_paths(monkeypatch, tmp_path)
+        events: list[tuple[str, str, dict]] = []
+        monkeypatch.setattr(
+            orchestrator,
+            "_feed_event",
+            lambda event, level="info", data=None, paths=None: events.append((event, level, dict(data or {}))),
+        )
+        monkeypatch.setattr(orchestrator, "_log", lambda msg: None)
+        monkeypatch.setattr(orchestrator, "_write_dispatch_log", lambda *args, **kwargs: None)
+        monkeypatch.setattr(
+            orchestrator,
+            "_agent_command",
+            lambda backend, prompt: (["codex.exe", "exec"], None, "STDIN_PAYLOAD"),
+        )
+
+        class _OkProc:
+            returncode = 0
+
+            def poll(self):
+                return 0
+
+            def wait(self, timeout=None):
+                return 0
+
+            def terminate(self):
+                raise AssertionError("must not terminate")
+
+            stdout = None
+            stderr = None
+
+        monkeypatch.setattr(orchestrator.subprocess, "Popen", lambda cmd, **kwargs: _OkProc())
+        monkeypatch.setattr(
+            orchestrator,
+            "_collect_streamed_process_output",
+            lambda proc, *, role, backend, parse_event_fn, stdin_text, timeout_sec, verbose,
+            summary_callback=None, stdout_line_callback=None: ("", "", 0, False),
+        )
+
+        orchestrator._run_auto_dispatch("worker", "codex", "prompt text here", 30)
+
+        starts = [d for e, _lvl, d in events if e == orchestrator.FEED_DISPATCH_START]
+        assert starts, "expected a dispatch_start event"
+        assert starts[0]["prompt_chars"] == len("prompt text here")
+
+
 class TestConfigUnknownKeyWarning:
     def test_unknown_config_key_logs_warning(self, tmp_path: Path, monkeypatch) -> None:
         _configure_loop_paths(monkeypatch, tmp_path)
