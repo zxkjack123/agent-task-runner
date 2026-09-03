@@ -34,7 +34,7 @@ _core_module._SECTION_OWNERSHIP_MAP = {
     "paths": ("LoopPaths", "_path", "_configure_loop_paths", "_resolve_paths"),
     "state": ("_default_state", "_load_state", "_save_state", "_apply_state_transition"),
     "file_bus": ("_prepare_bus_file", "_archive_bus_file", "_wait_for_file", "_sync_task_card_to_bus"),
-    "lock": ("_lock_file", "_unlock_file", "_LoopLock", "_acquire_run_lock"),
+    "lock": ("_lock_file", "_unlock_file", "_LoopLock", "_acquire_run_lock", "_repo_lock_path", "_acquire_repo_lock"),
     "dispatch": ("register_backend", "_agent_command", "_run_auto_dispatch", "_dispatch_with_artifact_fallback"),
     "session": ("SessionManager", "_session_resume_id", "_resolve_session_resume_policy", "_store_session"),
     "config": ("RunConfig", "_load_config", "_load_env_config", "_validate_run_config", "_warn_unknown_config_keys"),
