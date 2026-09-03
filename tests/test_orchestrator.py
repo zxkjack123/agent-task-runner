@@ -14879,3 +14879,148 @@ class TestDaemonIdle:
             )
         assert exc.value.code == orchestrator.EXIT_DIRTY_WORKTREE
         assert "overlaps task in-scope files" in capsys.readouterr().err
+
+
+# ===== [Plan: pm3155-repo-mutex-lock] T2.1: repo lock unit tests =====
+
+
+class TestRepoLockPath:
+    def test_same_root_same_path(self, tmp_path: Path) -> None:
+        p1 = orchestrator._repo_lock_path(root=tmp_path)
+        p2 = orchestrator._repo_lock_path(root=tmp_path)
+        assert p1 == p2
+
+    def test_different_roots_different_paths(self, tmp_path: Path) -> None:
+        p1 = orchestrator._repo_lock_path(root=tmp_path / "a")
+        p2 = orchestrator._repo_lock_path(root=tmp_path / "b")
+        assert p1 != p2
+
+    def test_lock_filename_is_sha256_hex(self, tmp_path: Path) -> None:
+        lock_path = orchestrator._repo_lock_path(root=tmp_path)
+        assert lock_path.parent.name == "loop-kit-repo-locks"
+        assert lock_path.name.endswith(".lock")
+        hex_part = lock_path.name[: -len(".lock")]
+        assert len(hex_part) == 64
+        assert all(c in "0123456789abcdef" for c in hex_part)
+
+    def test_git_repo_uses_toplevel(self, tmp_path: Path) -> None:
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+        (repo / "f").write_text("x", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "i"], cwd=repo, check=True)
+        assert orchestrator._repo_lock_path(root=repo) == orchestrator._repo_lock_path(root=repo.resolve())
+
+    def test_non_git_falls_back_to_resolve(self, tmp_path: Path) -> None:
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        assert orchestrator._repo_lock_path(root=plain) == orchestrator._repo_lock_path(root=plain.resolve())
+
+
+class TestAcquireRepoLock:
+    def test_acquire_and_release(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setattr(orchestrator, "ROOT", tmp_path)
+        lock = orchestrator._acquire_repo_lock()
+        assert isinstance(lock, orchestrator._LoopLock)
+        lock_path = orchestrator._repo_lock_path()
+        assert lock_path.read_text(encoding="utf-8") == f"pid:{os.getpid()}\n"
+        lock.release()
+        # Re-acquisition after release must succeed (flock released on close).
+        lock2 = orchestrator._acquire_repo_lock()
+        lock2.release()
+
+    def test_conflict_raises_with_distinct_message(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setattr(orchestrator, "ROOT", tmp_path)
+        lock = orchestrator._acquire_repo_lock()
+        try:
+            with pytest.raises(RuntimeError) as exc:
+                orchestrator._acquire_repo_lock()
+            msg = str(exc.value)
+            assert "another loop run is already using this working tree" in msg
+            assert "another orchestrator instance" not in msg
+        finally:
+            lock.release()
+
+    def test_oserror_wrapped_fail_closed(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setattr(orchestrator, "ROOT", tmp_path)
+
+        class _OserrorLoopLock:
+            def __init__(self, path: Path) -> None:
+                self.path = path
+
+            def acquire(self) -> None:
+                raise OSError("boom")
+
+            def release(self) -> None:
+                return None
+
+        monkeypatch.setattr(orchestrator, "_LoopLock", _OserrorLoopLock)
+        with pytest.raises(RuntimeError) as exc:
+            orchestrator._acquire_repo_lock()
+        assert "repo lock unavailable" in str(exc.value)
+
+
+class TestRepoLockPidRecord:
+    def test_alive_unrelated_pid_does_not_block(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setattr(orchestrator, "ROOT", tmp_path)
+        lock_path = orchestrator._repo_lock_path()
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        # Self pid recorded but no flock held: acquisition must still succeed
+        # (flock is the sole authority; pid is diagnostics only).
+        lock_path.write_text(f"pid:{os.getpid()}\n", encoding="utf-8")
+        lock = orchestrator._acquire_repo_lock()
+        lock.release()
+
+    def test_diagnostic_reads_pid_but_never_authoritative(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setattr(orchestrator, "ROOT", tmp_path)
+        lock = orchestrator._acquire_repo_lock()
+        lock_path = orchestrator._repo_lock_path()
+        try:
+            assert lock_path.read_text(encoding="utf-8") == f"pid:{os.getpid()}\n"
+            caught: list[str] = []
+
+            def _try_acquire() -> None:
+                try:
+                    orchestrator._acquire_repo_lock()
+                except RuntimeError as exc:
+                    caught.append(str(exc))
+
+            thread = threading.Thread(target=_try_acquire)
+            thread.start()
+            thread.join(timeout=10)
+            assert not thread.is_alive(), "second acquire must not block forever"
+            assert caught, "second acquire must raise RuntimeError"
+            msg = caught[0]
+            assert "another loop run is already using this working tree" in msg
+            # Same-process self-pid branch yields "stale or reused pid record (N)";
+            # never the "held by pid" wording (that needs a non-self live pid).
+            assert str(os.getpid()) in msg or "holder unknown" in msg
+            assert "held by pid" not in msg
+        finally:
+            lock.release()
+        lock2 = orchestrator._acquire_repo_lock()
+        try:
+            # Corrupt the pid line AFTER acquisition (a successful acquire
+            # overwrites the record): the conflicting reader then sees garbage
+            # and must degrade to the generic message without raising.
+            lock_path.write_text("not-a-pid\n", encoding="utf-8")
+            with pytest.raises(RuntimeError) as exc:
+                orchestrator._acquire_repo_lock()
+            msg = str(exc.value)
+            assert "another loop run is already using this working tree" in msg
+            assert "holder unknown" in msg
+            assert "held by pid" not in msg
+            assert "stale or reused pid record" not in msg
+        finally:
+            lock2.release()
+
+    def test_malformed_pid_line_tolerated(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setattr(orchestrator, "ROOT", tmp_path)
+        lock_path = orchestrator._repo_lock_path()
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.write_text("x" * 100, encoding="utf-8")
+        lock = orchestrator._acquire_repo_lock()
+        lock.release()
