@@ -5460,9 +5460,7 @@ def test_single_round_no_change_round_details_cross_run_approve_is_success(tmp_p
 # ── T-3129: out-of-repo output_files as change evidence ─────────────────────
 
 
-def test_single_round_no_change_with_external_output_files_is_success(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_single_round_no_change_with_external_output_files_is_success(tmp_path: Path, monkeypatch) -> None:
     # Use case A: declared out-of-repo output_files that exist → success, not noop.
     _configure_loop_paths(monkeypatch, tmp_path)
 
@@ -5530,9 +5528,7 @@ def test_single_round_no_change_with_external_output_files_is_success(
     assert (orchestrator.LOOP_DIR / "review_request.json").exists() is False
 
 
-def test_single_round_no_change_empty_output_files_still_fails(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_single_round_no_change_empty_output_files_still_fails(tmp_path: Path, monkeypatch) -> None:
     # Use case B: real noop (no diff, no usable output_files) still fails.
     _configure_loop_paths(monkeypatch, tmp_path)
 
@@ -5584,9 +5580,7 @@ def test_single_round_no_change_empty_output_files_still_fails(
     assert "no code changes" in state["error"]
 
 
-def test_single_round_no_change_missing_output_files_ignored_with_warning(
-    tmp_path: Path, monkeypatch, capsys
-) -> None:
+def test_single_round_no_change_missing_output_files_ignored_with_warning(tmp_path: Path, monkeypatch, capsys) -> None:
     # Use case C: declared-but-missing output_files are ignored with a warning;
     # no crash and no false success.
     _configure_loop_paths(monkeypatch, tmp_path)
@@ -15086,10 +15080,7 @@ class TestCmdRunRepoLock:
     def test_cmd_run_repo_lock_conflict_exits_5(self, monkeypatch, capsys) -> None:
         def _conflict(paths=None) -> None:
             _ = paths
-            raise RuntimeError(
-                "another loop run is already using this working tree "
-                "(held by pid 1) (lock: /tmp/x)"
-            )
+            raise RuntimeError("another loop run is already using this working tree (held by pid 1) (lock: /tmp/x)")
 
         monkeypatch.setattr(orchestrator, "_acquire_repo_lock", _conflict)
 
@@ -15156,9 +15147,7 @@ class TestCmdRunRepoLock:
 
         # Scope overlap in daemon mode still refuses with exit 4.
         card.write_text(
-            json.dumps(
-                {"task_id": "T-DAEMON-2", "title": "t", "goal": "g", "in_scope": ["src/foo.py"]}
-            ),
+            json.dumps({"task_id": "T-DAEMON-2", "title": "t", "goal": "g", "in_scope": ["src/foo.py"]}),
             encoding="utf-8",
         )
         with pytest.raises(SystemExit) as exc:
@@ -15203,6 +15192,26 @@ def _loop_run_cmd(repo: Path, card: Path) -> list[str]:
         "--task",
         str(card),
     ]
+
+
+def _single_round_orphan_pids(repo: Path) -> list[int]:
+    """Read-only /proc scan for --single-round loop runs referencing this test's
+    task card (CT O1 regression guard). Scoped to the unique pytest tmp card
+    path, so unrelated processes can never match -- and this helper never kills
+    anything. Linux-only, matching the CI/dev environment."""
+    marker = str(repo / ".loop" / "task_card.json")
+    found: list[int] = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            raw = (entry / "cmdline").read_bytes()
+        except OSError:
+            continue  # process vanished between readdir and read
+        cmdline = raw.replace(b"\x00", b" ").decode("utf-8", "replace")
+        if "--single-round" in cmdline and marker in cmdline:
+            found.append(int(entry.name))
+    return found
 
 
 class TestDirtyTreeFailFastNoRetry:
@@ -15329,27 +15338,42 @@ class TestHistoricalReplayT3151T3152:
         _init_tmp_repo(repo)
         card = _write_minimal_card(repo, "T-3152B")
 
+        # CT O1 fix-forward: run in a dedicated process group. The multi-round
+        # parent spawns a --single-round grandchild (subprocess.Popen in _core.py
+        # has no start_new_session), which subprocess.run(timeout=60) left behind
+        # as an orphan reparented to systemd --user. start_new_session=True makes
+        # the child a group leader, so the timeout path can killpg the whole
+        # group -- child and grandchild -- with no risk to unrelated processes.
         start = time.monotonic()
+        proc = subprocess.Popen(
+            _loop_run_cmd(repo, card),
+            cwd=repo,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
         try:
-            result = subprocess.run(
-                _loop_run_cmd(repo, card),
-                cwd=repo,
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
+            _stdout, stderr = proc.communicate(timeout=60)
         except subprocess.TimeoutExpired:
             # Timeout-evidence semantics (REFINE-2): not exiting within 60s means
             # the subprocess passed the repo lock (no exit 5) and the dirty-tree
             # check (no exit 4) and entered later loop stages that wait on PM
             # dependencies unavailable in this environment. That is a PASS for
             # this case's goal: after release the lock is free and a clean tree
-            # proceeds past the fail-fast gates.
+            # proceeds past the fail-fast gates. Before declaring PASS, reap the
+            # whole process group so no grandchild leaks (O1); ProcessLookupError
+            # covers the child exiting exactly at the 60s boundary.
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            proc.wait()  # reap the direct child (group already killed)
             elapsed = time.monotonic() - start
             assert elapsed >= 59.0, f"timeout fired unexpectedly early: {elapsed:.1f}s"
+            orphans = _single_round_orphan_pids(repo)
+            assert not orphans, f"single-round grandchild leaked after group kill: {orphans}"
             return
         elapsed = time.monotonic() - start
-        assert result.returncode not in (4, 5), (
+        assert proc.returncode not in (4, 5), (
             f"clean tree must pass the dirty check (not 4) and the repo lock (not 5); "
-            f"got {result.returncode}. stderr: {result.stderr[-500:]}"
+            f"got {proc.returncode}. stderr: {stderr[-500:]}"
         )
