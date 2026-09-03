@@ -15024,3 +15024,149 @@ class TestRepoLockPidRecord:
         lock_path.write_text("x" * 100, encoding="utf-8")
         lock = orchestrator._acquire_repo_lock()
         lock.release()
+
+
+# ===== [Plan: pm3155-repo-mutex-lock] T2.2: cmd_run lock semantic integration tests =====
+
+
+class _RecorderLock:
+    """Test double recording acquisition order and release order."""
+
+    def __init__(self, name: str, released: list[str]) -> None:
+        self.name = name
+        self.released = released
+
+    def release(self) -> None:
+        self.released.append(self.name)
+
+
+class TestCmdRunRepoLock:
+    def test_cmd_run_acquires_repo_lock_before_loop_lock(self, monkeypatch) -> None:
+        acquired: list[str] = []
+        released: list[str] = []
+
+        def _fake_repo_lock(paths=None) -> _RecorderLock:
+            _ = paths
+            acquired.append("repo")
+            return _RecorderLock("repo", released)
+
+        def _fake_run_lock(paths=None) -> _RecorderLock:
+            _ = paths
+            acquired.append("loop_dir")
+            return _RecorderLock("loop_dir", released)
+
+        monkeypatch.setattr(orchestrator, "_acquire_repo_lock", _fake_repo_lock)
+        monkeypatch.setattr(orchestrator, "_acquire_run_lock", _fake_run_lock)
+        monkeypatch.setattr(orchestrator, "_dirty_tracked_paths", lambda: [])
+        monkeypatch.setattr(orchestrator, "_main_loop", lambda **kwargs: None)
+
+        orchestrator.cmd_run(
+            _run_config(".loop/task_card.json"),
+            single_round=False,
+            round_num=None,
+        )
+
+        assert acquired == ["repo", "loop_dir"]
+        assert released == ["loop_dir", "repo"]
+
+    def test_cmd_run_single_round_skips_repo_lock(self, monkeypatch) -> None:
+        def _must_not_be_called(paths=None) -> None:
+            _ = paths
+            raise AssertionError("repo lock must not be acquired in single-round mode")
+
+        monkeypatch.setattr(orchestrator, "_acquire_repo_lock", _must_not_be_called)
+        monkeypatch.setattr(orchestrator, "_run_single_round", lambda **kwargs: None)
+
+        orchestrator.cmd_run(
+            _run_config(".loop/task_card.json"),
+            single_round=True,
+            round_num=1,
+        )
+
+    def test_cmd_run_repo_lock_conflict_exits_5(self, monkeypatch, capsys) -> None:
+        def _conflict(paths=None) -> None:
+            _ = paths
+            raise RuntimeError(
+                "another loop run is already using this working tree "
+                "(held by pid 1) (lock: /tmp/x)"
+            )
+
+        monkeypatch.setattr(orchestrator, "_acquire_repo_lock", _conflict)
+
+        with pytest.raises(SystemExit) as exc:
+            orchestrator.cmd_run(
+                _run_config(".loop/task_card.json"),
+                single_round=False,
+                round_num=None,
+            )
+
+        assert exc.value.code == 5
+        assert "another loop run is already using this working tree" in capsys.readouterr().err
+
+    def test_cmd_run_releases_repo_lock_when_loop_lock_fails(self, monkeypatch) -> None:
+        released: list[str] = []
+
+        def _fake_repo_lock(paths=None) -> _RecorderLock:
+            _ = paths
+            return _RecorderLock("repo", released)
+
+        def _fail_run_lock(paths=None) -> None:
+            _ = paths
+            raise RuntimeError("loop-dir lock busy")
+
+        monkeypatch.setattr(orchestrator, "_acquire_repo_lock", _fake_repo_lock)
+        monkeypatch.setattr(orchestrator, "_acquire_run_lock", _fail_run_lock)
+
+        with pytest.raises(SystemExit) as exc:
+            orchestrator.cmd_run(
+                _run_config(".loop/task_card.json"),
+                single_round=False,
+                round_num=None,
+            )
+
+        assert exc.value.code == 5
+        # B7: repo lock already acquired must be released on partial failure.
+        assert released == ["repo"]
+
+    def test_cmd_run_daemon_warn_only_semantics_unchanged(self, tmp_path: Path, monkeypatch, capsys) -> None:
+        _configure_loop_paths(monkeypatch, tmp_path)
+        card = tmp_path / "card.json"
+        card.write_text(
+            json.dumps({"task_id": "T-DAEMON-1", "title": "t", "goal": "g"}),
+            encoding="utf-8",
+        )
+
+        class _NoopLock:
+            def release(self) -> None:
+                return None
+
+        monkeypatch.setattr(orchestrator, "_acquire_repo_lock", lambda paths=None: _NoopLock())
+        monkeypatch.setattr(orchestrator, "_acquire_run_lock", lambda paths=None: _NoopLock())
+        monkeypatch.setattr(orchestrator, "_dirty_tracked_paths", lambda: ["src/foo.py"])
+        monkeypatch.setattr(orchestrator, "_main_loop", lambda **kwargs: None)
+
+        # warn_only (daemon) path: dirty tree without scope overlap proceeds.
+        orchestrator.cmd_run(
+            _run_config(str(card)),
+            single_round=False,
+            round_num=None,
+            daemon_mode=True,
+        )
+        assert "proceeding" in capsys.readouterr().err.lower()
+
+        # Scope overlap in daemon mode still refuses with exit 4.
+        card.write_text(
+            json.dumps(
+                {"task_id": "T-DAEMON-2", "title": "t", "goal": "g", "in_scope": ["src/foo.py"]}
+            ),
+            encoding="utf-8",
+        )
+        with pytest.raises(SystemExit) as exc:
+            orchestrator.cmd_run(
+                _run_config(str(card)),
+                single_round=False,
+                round_num=None,
+                daemon_mode=True,
+            )
+        assert exc.value.code == 4
+        assert "overlaps task in-scope files" in capsys.readouterr().err
