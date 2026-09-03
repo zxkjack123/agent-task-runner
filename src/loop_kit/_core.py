@@ -6879,7 +6879,7 @@ def _git_at(cwd: Path, *args: str, timeout: float | None = DEFAULT_GIT_TIMEOUT_S
         raise RuntimeError(f"git {' '.join(args)} timed out after {timeout_value}s") from exc
     if result.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} failed: {result.stderr.strip()}")
-    return result.stdout.strip()
+    return result.stdout.rstrip()
 
 
 def _git(*args: str, timeout: float | None = DEFAULT_GIT_TIMEOUT_SEC) -> str:
