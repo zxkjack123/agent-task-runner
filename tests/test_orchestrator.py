@@ -13940,17 +13940,13 @@ class TestSessionWatchdog:
         assert fields["session_elapsed_sec"] is None
 
     def test_session_budget_fields_not_exhausted(self) -> None:
-        fields = orchestrator._session_budget_fields(
-            deadline_at=1000.0, now=900.0, budget_sec=200.0
-        )
+        fields = orchestrator._session_budget_fields(deadline_at=1000.0, now=900.0, budget_sec=200.0)
         assert fields["session_timed_out"] is False
         assert fields["session_remaining_sec"] == 100.0
         assert fields["session_elapsed_sec"] == 100.0
 
     def test_session_budget_fields_exhausted(self) -> None:
-        fields = orchestrator._session_budget_fields(
-            deadline_at=1000.0, now=1000.5, budget_sec=200.0
-        )
+        fields = orchestrator._session_budget_fields(deadline_at=1000.0, now=1000.5, budget_sec=200.0)
         assert fields["session_timed_out"] is True
         assert fields["session_remaining_sec"] <= 0
 
@@ -14030,7 +14026,10 @@ class TestSessionWatchdog:
 
         with pytest.raises(orchestrator.DispatchTimeoutError, match="session wallclock budget exhausted"):
             orchestrator._run_auto_dispatch(
-                "worker", "codex", "prompt", 30,
+                "worker",
+                "codex",
+                "prompt",
+                30,
                 session_deadline_at=time.time() - 1,
             )
 
@@ -14081,9 +14080,7 @@ class TestSessionWatchdog:
 
     # ── ④ + ⑥ W-2 parent round-loop checkpoint (T-3263-a historical replay) ──
 
-    def test_parent_loop_budget_caps_rounds_and_reuses_terminate_wait_chain(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
+    def test_parent_loop_budget_caps_rounds_and_reuses_terminate_wait_chain(self, tmp_path: Path, monkeypatch) -> None:
         _configure_loop_paths(monkeypatch, tmp_path)
         task_path = tmp_path / "task.json"
         task_path.write_text(
@@ -14357,8 +14354,14 @@ class TestContextBudget:
         monkeypatch.setattr(
             orchestrator,
             "_collect_streamed_process_output",
-            lambda proc, *, role, backend, parse_event_fn, stdin_text, timeout_sec, verbose,
-            summary_callback=None, stdout_line_callback=None: ("", "", 0, False),
+            lambda proc, *, role, backend, parse_event_fn, stdin_text,
+                   timeout_sec, verbose, summary_callback=None,
+                   stdout_line_callback=None: (
+                "",
+                "",
+                0,
+                False,
+            ),
         )
 
         orchestrator._run_auto_dispatch("worker", "codex", "prompt text here", 30)
@@ -14406,9 +14409,7 @@ class TestTaskCardModeAndPatchContract:
 
     def test_invalid_mode_rejected_with_enum_list(self, tmp_path: Path) -> None:
         card_path = tmp_path / "task.json"
-        card_path.write_text(
-            json.dumps(self._card(mode="hack"), ensure_ascii=False), encoding="utf-8"
-        )
+        card_path.write_text(json.dumps(self._card(mode="hack"), ensure_ascii=False), encoding="utf-8")
 
         with pytest.raises(orchestrator.ConfigError) as exc:
             orchestrator._load_task_card_or_raise(str(card_path))
@@ -14419,9 +14420,7 @@ class TestTaskCardModeAndPatchContract:
 
     def test_patch_mode_without_contract_fails_closed(self, tmp_path: Path) -> None:
         card_path = tmp_path / "task.json"
-        card_path.write_text(
-            json.dumps(self._card(mode="patch"), ensure_ascii=False), encoding="utf-8"
-        )
+        card_path.write_text(json.dumps(self._card(mode="patch"), ensure_ascii=False), encoding="utf-8")
 
         with pytest.raises(orchestrator.ConfigError, match="fail-closed"):
             orchestrator._load_task_card_or_raise(str(card_path))
@@ -14507,9 +14506,7 @@ class TestTaskCardModeAndPatchContract:
 
     def test_mode_normalized_on_load(self, tmp_path: Path) -> None:
         card_path = tmp_path / "task.json"
-        card_path.write_text(
-            json.dumps(self._card(mode="  patch  "), ensure_ascii=False), encoding="utf-8"
-        )
+        card_path.write_text(json.dumps(self._card(mode="  patch  "), ensure_ascii=False), encoding="utf-8")
 
         with pytest.raises(orchestrator.ConfigError, match="fail-closed"):
             # stripped to "patch" -> now requires a plan_patch (fail-closed)
@@ -14581,6 +14578,291 @@ class TestPlanPatchContractRendering:
 
         assert "{" not in contract and "}" not in contract
         assert "a.md:heading=Phase 2" in contract
+
+
+class TestPlanPatchVerify:
+    """PM #3263 T2.3: post-verification hard gate (fail-closed, exit 6/3 layering)."""
+
+    # ── ①-⑤ verifier semantics against a real tmp git repo ──
+
+    def _patch_repo(self, tmp_path: Path, monkeypatch) -> Path:
+        repo = tmp_path / "repo"
+        _init_tmp_repo(repo)
+        monkeypatch.setattr(orchestrator, "ROOT", repo)
+        plan = repo / ".github" / "plans" / "x.md"
+        plan.parent.mkdir(parents=True)
+        plan.write_text("# Title\n\n## Phase 2\n\nline a\nline b\nline c\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "plan"], cwd=repo, check=True)
+        self._patch_base_sha = orchestrator._git_at(repo, "rev-parse", "HEAD").strip()
+        return plan
+
+    def _patch_commit(self, repo: Path) -> str:
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "patch"], cwd=repo, check=True)
+        return orchestrator._git_at(repo, "rev-parse", "HEAD").strip()
+
+    def test_in_scope_change_with_line_anchor_passes(self, tmp_path: Path, monkeypatch) -> None:
+        repo = tmp_path / "repo"
+        self._patch_repo(tmp_path, monkeypatch)
+        plan = repo / ".github" / "plans" / "x.md"
+        plan.write_text("# Title\n\n## Phase 2\n\nline a\nline b\nline C\n", encoding="utf-8")
+        head_sha = self._patch_commit(repo)
+
+        result = orchestrator._verify_plan_patch_scope(
+            {
+                "allowed_files": [".github/plans/x.md"],
+                "allowed_anchors": [{"file": ".github/plans/x.md", "line": 7}],
+            },
+            base_sha=self._patch_base_sha,
+            head_sha=head_sha,
+        )
+
+        assert result["ok"] is True
+        assert result["matched_files"] == [".github/plans/x.md"]
+        assert result["violations"] == []
+
+    def test_out_of_scope_modified_file_violates(self, tmp_path: Path, monkeypatch) -> None:
+        repo = tmp_path / "repo"
+        self._patch_repo(tmp_path, monkeypatch)
+        (repo / "f").write_text("changed\n", encoding="utf-8")
+        head_sha = self._patch_commit(repo)
+
+        result = orchestrator._verify_plan_patch_scope(
+            {
+                "allowed_files": [".github/plans/x.md"],
+                "allowed_anchors": [{"file": ".github/plans/x.md", "line": 1}],
+            },
+            base_sha=self._patch_base_sha,
+            head_sha=head_sha,
+        )
+
+        assert result["ok"] is False
+        assert any(v["type"] == "file_out_of_scope" and v["path"] == "f" for v in result["violations"])
+
+    def test_anchor_out_of_scope_violates(self, tmp_path: Path, monkeypatch) -> None:
+        repo = tmp_path / "repo"
+        self._patch_repo(tmp_path, monkeypatch)
+        plan = repo / ".github" / "plans" / "x.md"
+        plan.write_text("# Title\n\n## Phase 2\n\nline A\nline b\nline c\n", encoding="utf-8")
+        head_sha = self._patch_commit(repo)
+
+        result = orchestrator._verify_plan_patch_scope(
+            {
+                "allowed_files": [".github/plans/x.md"],
+                "allowed_anchors": [{"file": ".github/plans/x.md", "line": 7}],
+            },
+            base_sha=self._patch_base_sha,
+            head_sha=head_sha,
+        )
+
+        assert result["ok"] is False
+        assert any(v["type"] == "anchor_out_of_scope" for v in result["violations"])
+
+    def test_heading_anchor_within_window_passes(self, tmp_path: Path, monkeypatch) -> None:
+        repo = tmp_path / "repo"
+        self._patch_repo(tmp_path, monkeypatch)
+        plan = repo / ".github" / "plans" / "x.md"
+        plan.write_text("# Title\n\n## Phase 2\n\nline a\nline b\nline C\n", encoding="utf-8")
+        head_sha = self._patch_commit(repo)
+
+        result = orchestrator._verify_plan_patch_scope(
+            {
+                "allowed_files": [".github/plans/x.md"],
+                "allowed_anchors": [{"file": ".github/plans/x.md", "heading": "Phase 2"}],
+            },
+            base_sha=self._patch_base_sha,
+            head_sha=head_sha,
+        )
+
+        assert result["ok"] is True
+
+    def test_untracked_new_file_violates_when_forbidden(self, tmp_path: Path, monkeypatch) -> None:
+        repo = tmp_path / "repo"
+        self._patch_repo(tmp_path, monkeypatch)
+        (repo / "sneaky.txt").write_text("new\n", encoding="utf-8")
+
+        result = orchestrator._verify_plan_patch_scope(
+            {
+                "allowed_files": [".github/plans/x.md"],
+                "allowed_anchors": [{"file": ".github/plans/x.md", "line": 1}],
+                "forbid_new_files": True,
+            },
+            base_sha=self._patch_base_sha,
+            head_sha=self._patch_base_sha,
+        )
+
+        assert result["ok"] is False
+        assert any(v["type"] == "new_file_out_of_scope" and v["path"] == "sneaky.txt" for v in result["violations"])
+
+    def test_plan_change_without_anchors_fails_closed(self, tmp_path: Path, monkeypatch) -> None:
+        repo = tmp_path / "repo"
+        self._patch_repo(tmp_path, monkeypatch)
+        plan = repo / ".github" / "plans" / "x.md"
+        plan.write_text("# Title\n\n## Phase 2\n\nline A\nline b\nline c\n", encoding="utf-8")
+        head_sha = self._patch_commit(repo)
+
+        result = orchestrator._verify_plan_patch_scope(
+            {"allowed_files": [".github/plans/x.md"]},
+            base_sha=self._patch_base_sha,
+            head_sha=head_sha,
+        )
+
+        assert result["ok"] is False
+        assert any(
+            v["type"] == "anchor_out_of_scope" and "allowed_anchors" in str(v.get("detail"))
+            for v in result["violations"]
+        )
+
+    def test_git_failure_fails_closed(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setattr(orchestrator, "ROOT", tmp_path / "not-a-repo")
+
+        result = orchestrator._verify_plan_patch_scope(
+            {"allowed_files": ["x.md"]},
+            base_sha="base-sha",
+            head_sha="head-sha",
+        )
+
+        assert result["ok"] is False
+        assert result["violations"][0]["type"] == "git_unavailable"
+
+    # ── ⑥ violation raise path ──
+
+    def test_raise_plan_patch_violation_emits_and_raises(self, tmp_path: Path, monkeypatch) -> None:
+        _configure_loop_paths(monkeypatch, tmp_path)
+        events: list[tuple[str, str, dict]] = []
+        monkeypatch.setattr(
+            orchestrator,
+            "_feed_event",
+            lambda event, level="info", data=None, paths=None: events.append((event, level, dict(data or {}))),
+        )
+
+        def fake_popen(*args, **kwargs):
+            raise AssertionError("violation path must never dispatch")
+
+        monkeypatch.setattr(orchestrator.subprocess, "Popen", fake_popen)
+
+        with pytest.raises(orchestrator.PermanentDispatchError, match="fail-closed"):
+            orchestrator._raise_plan_patch_violation(
+                {"violations": [{"type": "file_out_of_scope", "path": "x"}], "diff_range": "ok"}
+            )
+
+        violation_events = [d for e, _lvl, d in events if e == orchestrator.FEED_PLAN_PATCH_VIOLATION]
+        assert violation_events, "expected a plan_patch_violation event"
+        assert violation_events[0]["plan_patch_violations"] == [{"type": "file_out_of_scope", "path": "x"}]
+
+    # ── ⑦ exit-6 layering: child asserts 6, parent normalizes to 3 ──
+
+    def test_single_round_violation_exits_6(self, tmp_path: Path, monkeypatch) -> None:
+        repo = tmp_path / "repo"
+        _init_tmp_repo(repo)
+        _configure_loop_paths(monkeypatch, repo)
+        (repo / "out_of_scope_touched.txt").write_text("boom\n", encoding="utf-8")
+        task_path = repo / "task.json"
+        card: dict[str, object] = {
+            "task_id": "T-PV7",
+            "goal": "patch",
+            "in_scope": ["x.md"],
+            "mode": "patch",
+            "plan_patch": {
+                "allowed_files": [".github/plans/x.md"],
+                "allowed_anchors": [{"file": ".github/plans/x.md", "line": 1}],
+            },
+        }
+        task_path.write_text(json.dumps(card, ensure_ascii=False), encoding="utf-8")
+        monkeypatch.setattr(orchestrator, "_is_git_repo_root", lambda p: False)
+        monkeypatch.setattr(orchestrator, "_sync_task_card_to_bus", lambda tp, round_num=1, paths=None: (card, "T-PV7"))
+        monkeypatch.setattr(
+            orchestrator,
+            "_load_state",
+            lambda paths=None: {
+                "state": "idle",
+                "round": 1,
+                "task_id": "T-PV7",
+                "base_sha": "base-sha",
+                "run_id": "run-pv7",
+            },
+        )
+        monkeypatch.setattr(orchestrator, "_write_task_card_status", lambda *a, **k: None)
+        monkeypatch.setattr(orchestrator, "_archive_state_for_round", lambda *a, **k: None)
+        monkeypatch.setattr(orchestrator, "_current_sha", lambda: "base-sha")
+        fake_work = {
+            "task_id": "T-PV7",
+            "head_sha": "head-sha",
+            "round": 1,
+            "run_id": "run-pv7",
+            "notes": "",
+            "tests": [],
+            "files_changed": ["out_of_scope_touched.txt"],
+        }
+        monkeypatch.setattr(orchestrator, "_auto_dispatch_role", lambda **kwargs: dict(fake_work))
+        monkeypatch.setattr(orchestrator, "_diff", lambda base, head: "diff-content")
+        monkeypatch.setattr(orchestrator, "_log_oneline", lambda base, head: "base..head")
+        events: list[tuple[str, str, dict]] = []
+        monkeypatch.setattr(
+            orchestrator,
+            "_feed_event",
+            lambda event, level="info", data=None, paths=None: events.append((event, level, dict(data or {}))),
+        )
+
+        with pytest.raises(SystemExit) as exc:
+            orchestrator._run_single_round(
+                config=orchestrator.RunConfig(task_path=str(task_path), auto_dispatch=True),
+                round_num=1,
+                single_round=True,
+            )
+
+        assert exc.value.code == orchestrator.EXIT_PLAN_PATCH_VIOLATION
+        assert any(e == orchestrator.FEED_PLAN_PATCH_VIOLATION for e, _lvl, _d in events)
+
+    def test_exit_6_asserted_only_in_single_round_layer(self) -> None:
+        source = Path(orchestrator.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        functions = {node.name: node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+        single_round = functions["_run_single_round"]
+        multi_round = functions["_run_multi_round_via_subprocess"]
+
+        def has_exit_6(node: ast.AST) -> bool:
+            for sub in ast.walk(node):
+                if (
+                    isinstance(sub, ast.Call)
+                    and isinstance(sub.func, ast.Attribute)
+                    and sub.func.attr == "exit"
+                    and sub.args
+                    and isinstance(sub.args[0], ast.Name)
+                    and sub.args[0].id == "EXIT_PLAN_PATCH_VIOLATION"
+                ):
+                    return True
+            return False
+
+        assert has_exit_6(single_round)
+        assert not has_exit_6(multi_round)
+
+    def test_patch_hook_guarded_by_mode(self) -> None:
+        source = Path(orchestrator.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        single_round = next(
+            node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "_run_single_round"
+        )
+        guards: list[str] = []
+        for node in ast.walk(single_round):
+            if isinstance(node, ast.If):
+                dumped = ast.dump(node.test)
+                if "patch" in dumped and "mode" in dumped:
+                    guards.append(dumped)
+        assert guards, "expected a mode==patch guard around the verification hook"
+
+    # ── ownership map consistency (CT-1 check item 2) ──
+
+    def test_git_helpers_ownership_entry_consistent_across_maps(self) -> None:
+        import loop_kit.orchestrator as facade
+
+        facade_map = facade._SECTION_OWNERSHIP_MAP
+        assert facade_map.get("git_helpers") == ("_git", "_git_at", "_verify_plan_patch_scope")
+
+    def test_verify_symbol_importable_via_facade(self) -> None:
+        assert callable(orchestrator._verify_plan_patch_scope)
+        assert callable(orchestrator._raise_plan_patch_violation)
 
 
 class TestConfigUnknownKeyWarning:

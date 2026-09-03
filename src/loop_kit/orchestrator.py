@@ -37,6 +37,7 @@ _core_module._SECTION_OWNERSHIP_MAP = {
     "lock": ("_lock_file", "_unlock_file", "_LoopLock", "_acquire_run_lock", "_repo_lock_path", "_acquire_repo_lock"),
     "dispatch": ("register_backend", "_agent_command", "_run_auto_dispatch", "_dispatch_with_artifact_fallback"),
     "session": ("SessionManager", "_session_resume_id", "_resolve_session_resume_policy", "_store_session"),
+    "git_helpers": ("_git", "_git_at", "_verify_plan_patch_scope"),
     "config": ("RunConfig", "_load_config", "_load_env_config", "_validate_run_config", "_warn_unknown_config_keys"),
     "prompts": ("_render_task_packet_section", "_worker_prompt", "_reviewer_prompt"),
 }
