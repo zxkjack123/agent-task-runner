@@ -14368,6 +14368,158 @@ class TestContextBudget:
         assert starts[0]["prompt_chars"] == len("prompt text here")
 
 
+class TestTaskCardModeAndPatchContract:
+    """PM #3263 T2.1: task card mode/plan_patch contract (fail-closed)."""
+
+    def _card(self, **overrides: object) -> dict[str, object]:
+        card: dict[str, object] = {
+            "task_id": "T-PP-1",
+            "goal": "patch test",
+            "in_scope": ["src/loop_kit/_core.py"],
+        }
+        card.update(overrides)
+        return card
+
+    def test_legacy_card_without_mode_or_plan_patch_validates(self, tmp_path: Path) -> None:
+        # ① legacy compatibility: a card without mode/plan_patch must validate
+        # and load exactly as before. (Note: .loop/examples/task_card.json is a
+        # TEMPLATE whose in_scope placeholders like '<file or module>' already
+        # fail the pre-existing path-pattern check — unrelated to the new
+        # keys — so legacy-compat is proven with a structurally valid card.)
+        card_path = tmp_path / "task.json"
+        card_path.write_text(json.dumps(self._card(), ensure_ascii=False), encoding="utf-8")
+        tp, loaded, task_id = orchestrator._load_task_card_or_raise(str(card_path))
+        assert task_id == "T-PP-1"
+        assert loaded.get("mode") is None
+        assert loaded.get("plan_patch") is None
+        _ = tp
+
+    def test_example_template_rejection_not_caused_by_new_keys(self, tmp_path: Path) -> None:
+        example_path = Path(orchestrator.ROOT) / ".loop" / "examples" / "task_card.json"
+        example = json.loads(example_path.read_text(encoding="utf-8"))
+
+        with pytest.raises(orchestrator.ConfigError) as exc:
+            orchestrator._validate_task_card_contract(example)
+
+        message = str(exc.value)
+        assert "mode" not in message and "plan_patch" not in message
+
+    def test_invalid_mode_rejected_with_enum_list(self, tmp_path: Path) -> None:
+        card_path = tmp_path / "task.json"
+        card_path.write_text(
+            json.dumps(self._card(mode="hack"), ensure_ascii=False), encoding="utf-8"
+        )
+
+        with pytest.raises(orchestrator.ConfigError) as exc:
+            orchestrator._load_task_card_or_raise(str(card_path))
+
+        message = str(exc.value)
+        assert "task card contract violation" in message
+        assert "patch" in message and "generate" in message  # enum values listed
+
+    def test_patch_mode_without_contract_fails_closed(self, tmp_path: Path) -> None:
+        card_path = tmp_path / "task.json"
+        card_path.write_text(
+            json.dumps(self._card(mode="patch"), ensure_ascii=False), encoding="utf-8"
+        )
+
+        with pytest.raises(orchestrator.ConfigError, match="fail-closed"):
+            orchestrator._load_task_card_or_raise(str(card_path))
+
+    def test_empty_allowed_files_rejected(self, tmp_path: Path) -> None:
+        card_path = tmp_path / "task.json"
+        card_path.write_text(
+            json.dumps(
+                self._card(mode="patch", plan_patch={"allowed_files": []}),
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        with pytest.raises(orchestrator.ConfigError, match="allowed_files"):
+            orchestrator._load_task_card_or_raise(str(card_path))
+
+    def test_anchor_missing_line_and_heading_rejected(self, tmp_path: Path) -> None:
+        card_path = tmp_path / "task.json"
+        card_path.write_text(
+            json.dumps(
+                self._card(
+                    mode="patch",
+                    plan_patch={
+                        "allowed_files": ["a.md"],
+                        "allowed_anchors": [{"file": "a.md"}],
+                    },
+                ),
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        with pytest.raises(orchestrator.ConfigError, match=r"anchor"):
+            orchestrator._load_task_card_or_raise(str(card_path))
+
+    def test_revise_mode_with_valid_plan_patch_passes(self, tmp_path: Path, monkeypatch) -> None:
+        logs: list[str] = []
+        monkeypatch.setattr(orchestrator, "_log", lambda msg: logs.append(msg))
+        card_path = tmp_path / "task.json"
+        card_path.write_text(
+            json.dumps(
+                self._card(
+                    mode="revise",
+                    plan_patch={
+                        "allowed_files": [".github/plans/x.md"],
+                        "allowed_anchors": [
+                            {"file": ".github/plans/x.md", "line": 12},
+                            {"file": ".github/plans/x.md", "heading": "Phase 2"},
+                        ],
+                        "forbid_new_files": True,
+                    },
+                ),
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        _tp, loaded, task_id = orchestrator._load_task_card_or_raise(str(card_path))
+
+        assert task_id == "T-PP-1"
+        assert loaded.get("mode") == "revise"
+        assert any("inactive" in m for m in logs)
+
+    def test_patch_mode_with_contract_passes(self, tmp_path: Path) -> None:
+        card_path = tmp_path / "task.json"
+        card_path.write_text(
+            json.dumps(
+                self._card(
+                    mode="patch",
+                    plan_patch={"allowed_files": [".github/plans/x.md"]},
+                ),
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        _tp, loaded, task_id = orchestrator._load_task_card_or_raise(str(card_path))
+
+        assert task_id == "T-PP-1"
+        assert loaded.get("mode") == "patch"
+        assert loaded.get("plan_patch") == {"allowed_files": [".github/plans/x.md"]}
+
+    def test_mode_normalized_on_load(self, tmp_path: Path) -> None:
+        card_path = tmp_path / "task.json"
+        card_path.write_text(
+            json.dumps(self._card(mode="  patch  "), ensure_ascii=False), encoding="utf-8"
+        )
+
+        with pytest.raises(orchestrator.ConfigError, match="fail-closed"):
+            # stripped to "patch" -> now requires a plan_patch (fail-closed)
+            orchestrator._load_task_card_or_raise(str(card_path))
+
+    def test_constants_exposed_via_facade(self) -> None:
+        assert orchestrator._TASK_MODES == ("generate", "patch", "revise", "rebuild")
+        assert orchestrator.EXIT_PLAN_PATCH_VIOLATION == 6
+
+
 class TestConfigUnknownKeyWarning:
     def test_unknown_config_key_logs_warning(self, tmp_path: Path, monkeypatch) -> None:
         _configure_loop_paths(monkeypatch, tmp_path)

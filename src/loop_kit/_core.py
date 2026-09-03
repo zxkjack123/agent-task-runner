@@ -240,6 +240,14 @@ class TaskCard(TypedDict, total=False):
     lane_merge_conflict_policy: NotRequired[str]
     lane_preserve_worktrees_on_failure: NotRequired[bool]
     verification: NotRequired[VerificationSpec]
+    mode: NotRequired[str]
+    plan_patch: NotRequired[dict[str, object]]
+
+
+# ── PM #3263: task-mode enum. mode=patch activates the plan-patch contract
+# (allowed_files/allowed_anchors whitelist + post-verification); revise/
+# rebuild are reserved observability slots (behavior same as generate).
+_TASK_MODES = ("generate", "patch", "revise", "rebuild")
 
 
 class CriticalDependencySection(TypedDict):
@@ -450,6 +458,10 @@ EXIT_TIMEOUT = 2
 EXIT_VALIDATION_ERROR = 3
 EXIT_DIRTY_WORKTREE = 4
 EXIT_LOCK_FAILURE = 5
+# PM #3263: plan-patch contract violation (fail-closed, no retry). Asserted
+# ONLY at the single-round subprocess layer; the parent normalizes any
+# non-zero child rc through the existing EXIT_VALIDATION_ERROR (3) path.
+EXIT_PLAN_PATCH_VIOLATION = 6
 EXIT_INTERRUPTED = 130
 PATTERN_STALE_DAYS = 30
 PATTERN_HIGH_CONFIDENCE = 0.7
@@ -8404,6 +8416,48 @@ def _in_scope_pattern_violation(item: str) -> str | None:
     return None
 
 
+def _validate_plan_patch_contract_shape(plan_patch: object) -> list[str]:
+    """Structural validation for a task card `plan_patch` section (PM #3263).
+
+    Returns a list of human-readable problems (empty = valid).
+    """
+    problems: list[str] = []
+    if not isinstance(plan_patch, dict):
+        problems.append(f"field 'plan_patch' must be an object, got {type(plan_patch).__name__}")
+        return problems
+    allowed_files = plan_patch.get("allowed_files")
+    if allowed_files is None:
+        problems.append("plan_patch: missing required key 'allowed_files'")
+    elif not isinstance(allowed_files, list) or not allowed_files:
+        problems.append("plan_patch: 'allowed_files' must be a non-empty list of repo-relative paths")
+    else:
+        for item in allowed_files:
+            if not isinstance(item, str) or not item.strip():
+                problems.append(f"plan_patch: allowed_files item {item!r} must be a non-empty string")
+    allowed_anchors = plan_patch.get("allowed_anchors")
+    if allowed_anchors is not None:
+        if not isinstance(allowed_anchors, list):
+            problems.append("plan_patch: 'allowed_anchors' must be a list of anchor objects")
+        else:
+            for anchor in allowed_anchors:
+                if not isinstance(anchor, dict):
+                    problems.append(f"plan_patch: anchor {anchor!r} must be an object")
+                    continue
+                anchor_file = anchor.get("file")
+                if not isinstance(anchor_file, str) or not anchor_file.strip():
+                    problems.append("plan_patch: anchor 'file' must be a non-empty string")
+                has_line = "line" in anchor and isinstance(anchor["line"], int) and not isinstance(anchor["line"], bool)
+                has_heading = isinstance(anchor.get("heading"), str) and bool(anchor["heading"].strip())
+                if not (has_line ^ has_heading):
+                    problems.append(
+                        "plan_patch: anchor must have exactly one of 'line' (int) or 'heading' (non-empty str)"
+                    )
+    forbid_new_files = plan_patch.get("forbid_new_files")
+    if forbid_new_files is not None and not isinstance(forbid_new_files, bool):
+        problems.append("plan_patch: 'forbid_new_files' must be a boolean")
+    return problems
+
+
 def _validate_task_card_contract(task_card: TaskCard) -> None:
     """Validate the task card contract at load time.
 
@@ -8432,6 +8486,26 @@ def _validate_task_card_contract(task_card: TaskCard) -> None:
                 violation = _in_scope_pattern_violation(item)
                 if violation is not None:
                     problems.append(f"in_scope item {item!r}: {violation}")
+    # PM #3263: task mode + plan patch contract (fail-closed; missing keys =
+    # valid, so legacy cards are unaffected).
+    mode = task_card.get("mode")
+    if mode is not None:
+        if not isinstance(mode, str) or mode.strip() not in _TASK_MODES:
+            problems.append(f"field 'mode' must be one of {', '.join(_TASK_MODES)}, got {mode!r}")
+        else:
+            mode = mode.strip()
+    plan_patch = task_card.get("plan_patch")
+    if plan_patch is not None:
+        problems.extend(_validate_plan_patch_contract_shape(plan_patch))
+    if mode == "patch" and plan_patch is None:
+        problems.append("mode 'patch' requires a 'plan_patch' contract (fail-closed)")
+    if (
+        isinstance(mode, str)
+        and mode != "patch"
+        and plan_patch is not None
+        and not problems
+    ):
+        _log(f"plan_patch contract present but inactive (mode={mode!r})")
     if problems:
         raise ConfigError("task card contract violation: " + "; ".join(problems))
 
@@ -8481,6 +8555,11 @@ def _load_task_card_or_raise(task_path: str | Path) -> tuple[Path, TaskCard, str
         if not isinstance(lane_preserve_worktrees_raw, bool):
             raise ConfigError(f"task card {tp}: field 'lane_preserve_worktrees_on_failure' must be a boolean")
         task_card_typed["lane_preserve_worktrees_on_failure"] = lane_preserve_worktrees_raw
+    # PM #3263: normalize task mode (validation already enforced the enum;
+    # strip so downstream == "patch" comparisons never miss whitespace).
+    mode_raw = task_card_typed.get("mode")
+    if isinstance(mode_raw, str):
+        task_card_typed["mode"] = mode_raw.strip()
     if dependencies:
         task_card_typed["depends_on"] = dependencies
     elif "depends_on" in task_card_typed:
