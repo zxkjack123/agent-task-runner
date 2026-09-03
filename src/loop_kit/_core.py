@@ -12697,21 +12697,24 @@ def cmd_run(
         _validate_run_config(config)
         lock: _LoopLock | None = None
         repo_lock: _LoopLock | None = None
-        # Lock order is fixed repo-level → loop-dir to prevent ABBA deadlock.
-        # Single-round subprocesses are spawned by the parent loop which already
-        # holds both locks, skip lock acquisition to avoid self-deadlock.
-        if not single_round:
-            try:
-                repo_lock = _acquire_repo_lock(paths=resolved_paths)
-            except RuntimeError as e:
-                print(f"Error: {e}", file=sys.stderr)
-                raise StateError(str(e)) from e
-            try:
-                lock = _acquire_run_lock(paths=resolved_paths)
-            except RuntimeError as e:
-                print(f"Error: {e}", file=sys.stderr)
-                raise StateError(str(e)) from e
         try:
+            # Lock order is fixed repo-level → loop-dir to prevent ABBA deadlock.
+            # Single-round subprocesses are spawned by the parent loop which already
+            # holds both locks, skip lock acquisition to avoid self-deadlock.
+            # Acquisition lives inside this try so the finally below always runs:
+            # a partial acquisition (repo lock held, loop-dir lock failed) must
+            # still release the repo lock (B7).
+            if not single_round:
+                try:
+                    repo_lock = _acquire_repo_lock(paths=resolved_paths)
+                except RuntimeError as e:
+                    print(f"Error: {e}", file=sys.stderr)
+                    raise StateError(str(e)) from e
+                try:
+                    lock = _acquire_run_lock(paths=resolved_paths)
+                except RuntimeError as e:
+                    print(f"Error: {e}", file=sys.stderr)
+                    raise StateError(str(e)) from e
             # Daemon idle: no task card and not an explicit task invocation →
             # exit cleanly BEFORE the dirty-worktree check so an idle daemon
             # never crash-loops on unrelated dirty files (PM #2747).
