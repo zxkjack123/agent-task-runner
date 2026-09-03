@@ -390,6 +390,8 @@ FEED_ROUND_COMPLETE = "round_complete"
 FEED_REVIEW_VERDICT = "review_verdict"
 FEED_HEARTBEAT = "heartbeat"
 FEED_STATE_TRANSITION = "state_transition"
+FEED_SESSION_BUDGET = "session_budget"
+FEED_SESSION_TIMEOUT = "session_timeout"
 FEED_LANE_PLAN_STAGE = "lane_plan_stage"
 FEED_LOG = "log"
 FEED_TASK_ROUTE_POLICY_RETAIN = "retain"
@@ -2806,6 +2808,50 @@ def _retry_budget_fields(
     }
 
 
+def _session_deadline_from_state(state: dict) -> float | None:
+    """Extract the session wallclock deadline from persisted state, if armed.
+
+    Missing / non-numeric values mean the watchdog is not armed and callers
+    simply proceed (zero behavior drift for sessions without a budget).
+    """
+    raw = state.get("session_deadline_at")
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    return float(raw)
+
+
+def _session_budget_fields(
+    *,
+    deadline_at: float | None,
+    now: float | None = None,
+    budget_sec: float = 0.0,
+) -> dict[str, object]:
+    """Pure session-wallclock budget arithmetic (PM #3263).
+
+    ``deadline_at=None`` means the watchdog is disabled; the result then
+    reports ``session_timed_out=False`` with ``session_remaining_sec=None``.
+    ``now`` is injectable so tests need no time monkeypatching.
+    ``budget_sec`` (the original session_timeout_sec) enables elapsed-time
+    reconstruction; when <= 0 the elapsed field is ``None``.
+    """
+    if deadline_at is None:
+        return {
+            "session_elapsed_sec": None,
+            "session_remaining_sec": None,
+            "session_timed_out": False,
+        }
+    resolved_now = time.time() if now is None else now
+    remaining = round(deadline_at - resolved_now, 3)
+    elapsed = None
+    if budget_sec > 0:
+        elapsed = max(0.0, round(resolved_now - (deadline_at - budget_sec), 3))
+    return {
+        "session_elapsed_sec": elapsed,
+        "session_remaining_sec": remaining,
+        "session_timed_out": remaining <= 0,
+    }
+
+
 def _report_dispatch_result(
     *,
     role: str,
@@ -2818,6 +2864,7 @@ def _report_dispatch_result(
     stdout_len: int | None = None,
     timeout_sec: int | None = None,
     interrupted: bool = False,
+    timeout_class: str | None = None,
     task_id: str | None = None,
     round_num: int | None = None,
     lane_id: str | None = None,
@@ -2843,6 +2890,8 @@ def _report_dispatch_result(
     data.update(_retry_budget_fields(attempt=attempt, max_attempts=max_attempts, phase="after_attempt"))
     if timeout_sec is not None:
         data["timeout_sec"] = timeout_sec
+    if timeout_class is not None:
+        data["timeout_class"] = timeout_class
     if session_id is not None:
         data["session_id"] = session_id
     if stdout_len is not None:
@@ -3140,6 +3189,7 @@ def _run_auto_dispatch(
     lane_id: str | None = None,
     resume_session_id: str | None = None,
     dispatch_started_at: float | None = None,
+    session_deadline_at: float | None = None,
     telemetry: dict[str, object] | None = None,
     cwd: Path | None = None,
     paths: LoopPaths | None = None,
@@ -3183,6 +3233,34 @@ def _run_auto_dispatch(
             attempt += 1
             current_attempt = attempt
             current_max_attempts = max_attempts
+            # PM #3263 W-4: session wallclock budget checkpoint before every
+            # attempt. Exhausted -> fail fast without spawning a subprocess,
+            # reusing the existing DispatchTimeoutError chain.
+            if session_deadline_at is not None:
+                session_attempt_budget = _session_budget_fields(
+                    deadline_at=session_deadline_at
+                )
+                if session_attempt_budget["session_timed_out"]:
+                    _feed_event(
+                        FEED_SESSION_TIMEOUT,
+                        level="error",
+                        data=_feed_data(
+                            task_id=task_id,
+                            round_num=round_num,
+                            role=role,
+                            lane_id=lane_id,
+                            backend=backend,
+                            attempt=attempt,
+                            max_attempts=max_attempts,
+                            timeout_class="session",
+                            **session_attempt_budget,
+                        ),
+                        paths=paths,
+                    )
+                    raise DispatchTimeoutError(
+                        f"{role} dispatch skipped: session wallclock budget exhausted "
+                        f"before attempt {attempt}/{max_attempts} (no subprocess spawned)."
+                    )
             attempt_budget_before = _retry_budget_fields(
                 attempt=current_attempt,
                 max_attempts=current_max_attempts,
@@ -3410,6 +3488,7 @@ def _run_auto_dispatch(
                     max_attempts=max_attempts,
                     session_id=cmd_sid,
                     timeout_sec=timeout_sec,
+                    timeout_class="dispatch",
                     task_id=task_id,
                     round_num=round_num,
                     lane_id=lane_id,
@@ -6742,7 +6821,7 @@ def _save_state(state: dict, paths: LoopPaths | None = None) -> None:
         shutil.copy2(state_file, state_backup)
         _STATE_CMP_KEYS = (
             "state", "round", "outcome", "task_id", "run_id", "base_sha", "head_sha", "sessions",
-            "lane_state", "head_sha_history",
+            "lane_state", "head_sha_history", "session_deadline_at",
         )
         if previous_state is not None and all(
             previous_state.get(k) == state_to_save.get(k) for k in _STATE_CMP_KEYS
@@ -8888,12 +8967,14 @@ def _validate_run_config(config: RunConfig) -> None:
             f"context_token_warn_pct must be an integer, got {warn_pct_raw!r}"
         )
     if warn_pct < 0 or warn_pct > 100:
-        clamped = max(0, min(100, warn_pct))
+        original = warn_pct
+        warn_pct = max(0, min(100, warn_pct))
         _log(
-            f"context_token_warn_pct out of range [0, 100] ({warn_pct}); "
-            f"clamped to {clamped}"
+            f"context_token_warn_pct out of range [0, 100] ({original}); "
+            f"clamped to {warn_pct}"
         )
-        config.context_token_warn_pct = clamped
+    if config.context_token_warn_pct != warn_pct:
+        config.context_token_warn_pct = warn_pct
     for bool_name, value in (
         ("require_heartbeat", config.require_heartbeat),
         ("auto_dispatch", config.auto_dispatch),
@@ -10937,6 +11018,7 @@ def _auto_dispatch_role(
             lane_id=normalized_lane_id,
             resume_session_id=resume_session_id,
             dispatch_started_at=dispatch_started_at,
+            session_deadline_at=_session_deadline_from_state(current_state),
             telemetry=dispatch_metrics,
             paths=paths,
         )
@@ -11309,6 +11391,22 @@ def _run_single_round(
             paths=resolved_paths,
         )
 
+    # PM #3263 W-3: single-round fast-path self-limit. The parent loop also
+    # enforces the deadline before launching each round (W-2), so a missing
+    # key here simply means the watchdog is not armed — proceed unchanged.
+    session_deadline_at = _session_deadline_from_state(state)
+    if session_deadline_at is not None and _session_budget_fields(
+        deadline_at=session_deadline_at,
+        budget_sec=float(config.session_timeout_sec or 0),
+    )["session_timed_out"]:
+        _fail_single_round(
+            outcome="session_timeout",
+            message="session wallclock budget exhausted before single-round start",
+            exit_code=EXIT_TIMEOUT,
+            cleanup_lane_worktrees=False,
+        )
+        return
+
     if not state_task_id or not state_base_sha:
         if round_num != 1:
             _fail_single_round(
@@ -11509,6 +11607,7 @@ def _run_single_round(
                     round_num=round_num,
                     lane_id=lane_id,
                     dispatch_started_at=dispatch_started_at,
+                    session_deadline_at=session_deadline_at,
                     telemetry=dispatch_metrics,
                     cwd=handle.path,
                     paths=resolved_paths,
@@ -11692,6 +11791,7 @@ def _run_single_round(
                     round_num=round_num,
                     lane_id=lane_id,
                     dispatch_started_at=dispatch_started_at,
+                    session_deadline_at=session_deadline_at,
                     telemetry=dispatch_metrics,
                     cwd=lane_handle.path,
                     paths=resolved_paths,
@@ -12392,6 +12492,12 @@ def _run_multi_round_via_subprocess(
     if not worktree_checked:
         _enforce_clean_worktree_or_exit(allow_dirty=config.allow_dirty)
 
+    # PM #3263 W-2: snapshot the session wallclock deadline up front. The
+    # stale-state cleanup below may reset state.json, so the value must be
+    # held in memory before any cleanup path can wipe it. cmd_run (W-1) arms
+    # the deadline; absent -> watchdog disabled.
+    session_deadline_at = _session_deadline_from_state(_load_state(paths=resolved_paths))
+
     if resume_from_state is None:
         stale = _load_state(paths=resolved_paths)
         stale_state = stale.get("state")
@@ -12560,6 +12666,43 @@ def _run_multi_round_via_subprocess(
             if _interrupted_event.is_set():
                 interrupted = True
                 break
+
+            # PM #3263 W-2: per-round checkpoint. The finally block below
+            # terminates any live child process; the state contract records
+            # the session_timeout outcome and the parent exits EXIT_TIMEOUT.
+            session_budget = _session_budget_fields(
+                deadline_at=session_deadline_at,
+                budget_sec=float(config.session_timeout_sec or 0),
+            )
+            if session_budget["session_timed_out"]:
+                _log(
+                    f"Session wallclock budget exhausted before round {round_num}; "
+                    f"stopping ({config.session_timeout_sec}s budget)"
+                )
+                _feed_event(
+                    FEED_SESSION_TIMEOUT,
+                    level="error",
+                    data=_feed_data(
+                        task_id=task_id,
+                        round_num=round_num,
+                        role="orchestrator",
+                        timeout_class="session",
+                        **session_budget,
+                    ),
+                    paths=resolved_paths,
+                )
+                _fail_with_state(
+                    state,
+                    outcome="session_timeout",
+                    message=(
+                        "session wallclock budget exhausted "
+                        f"(timeout={config.session_timeout_sec}s) before round {round_num}"
+                    ),
+                    exit_code=EXIT_TIMEOUT,
+                    task_path=config.task_path,
+                    paths=resolved_paths,
+                )
+                return
 
             print(f"\n{'=' * 60}")
             print(f"  ROUND {round_num}/{config.max_rounds}  —  Single-Round Subprocess")
@@ -12734,6 +12877,40 @@ def _main_loop(
     )
 
 
+def _arm_session_budget_deadline(
+    config: RunConfig,
+    paths: LoopPaths | None = None,
+) -> float | None:
+    """Arm the session wallclock budget deadline (PM #3263 W-1).
+
+    Persists ``session_deadline_at`` (epoch float, 3 decimals) into state.json
+    so --single-round subprocesses can self-limit without new CLI surface.
+    Returns the armed deadline, or None when the watchdog is disabled
+    (session_timeout_sec <= 0).
+    """
+    if config.session_timeout_sec <= 0:
+        return None
+    resolved_paths = _resolve_paths(paths)
+    budget_state = _load_state(paths=resolved_paths)
+    session_deadline_at = round(time.time() + config.session_timeout_sec, 3)
+    budget_state["session_deadline_at"] = session_deadline_at
+    _save_state(budget_state, paths=resolved_paths)
+    _feed_event(
+        FEED_SESSION_BUDGET,
+        data=_feed_data(
+            role="orchestrator",
+            session_timeout_sec=config.session_timeout_sec,
+            session_deadline_at=session_deadline_at,
+        ),
+        paths=resolved_paths,
+    )
+    _log(
+        f"Session wallclock budget armed: {config.session_timeout_sec}s "
+        f"(deadline={session_deadline_at})"
+    )
+    return session_deadline_at
+
+
 def cmd_run(
     config: RunConfig,
     single_round: bool,
@@ -12832,6 +13009,11 @@ def cmd_run(
                     return
                 if _resume_handler is _terminal_outcome_handle_resume_failure:
                     _resume_handler(resume_state, config, paths=resolved_paths)
+
+            # PM #3263 W-1: arm the session wallclock budget deadline and
+            # persist it through state.json so --single-round subprocesses can
+            # self-limit (fast path) without any new CLI surface.
+            _arm_session_budget_deadline(config, paths=resolved_paths)
 
             _main_loop(
                 config=config,
@@ -13950,6 +14132,24 @@ def main() -> None:
                 cwd=args.cwd,
                 outcome_file=args.outcome_file,
                 verbose=args.verbose,
+                # PM #3263: budget fields follow the existing CLI > env > file
+                # > default chain (no CLI flags; env via LOOP_SESSION_TIMEOUT /
+                # LOOP_CONTEXT_TOKEN_BUDGET / LOOP_CONTEXT_TOKEN_WARN_PCT).
+                session_timeout_sec=_coerce_int_config(
+                    _cfg_val(None, "session_timeout_sec", 0),
+                    field_name="session_timeout_sec",
+                    minimum=0,
+                ),
+                context_token_budget=_coerce_int_config(
+                    _cfg_val(None, "context_token_budget", 0),
+                    field_name="context_token_budget",
+                    minimum=0,
+                ),
+                context_token_warn_pct=_coerce_int_config(
+                    _cfg_val(None, "context_token_warn_pct", 80),
+                    field_name="context_token_warn_pct",
+                    minimum=-10**9,  # range clamp happens in _validate_run_config
+                ),
             )
             _validate_run_config(config)
             cmd_run(

@@ -13928,6 +13928,258 @@ class TestBudgetConfig:
         orchestrator._validate_run_config(config)
 
 
+class TestSessionWatchdog:
+    """PM #3263 T1.2: session wallclock budget watchdog (W-1..W-4)."""
+
+    # ── ① pure-function boundaries ──
+
+    def test_session_budget_fields_disabled_when_no_deadline(self) -> None:
+        fields = orchestrator._session_budget_fields(deadline_at=None)
+        assert fields["session_timed_out"] is False
+        assert fields["session_remaining_sec"] is None
+        assert fields["session_elapsed_sec"] is None
+
+    def test_session_budget_fields_not_exhausted(self) -> None:
+        fields = orchestrator._session_budget_fields(
+            deadline_at=1000.0, now=900.0, budget_sec=200.0
+        )
+        assert fields["session_timed_out"] is False
+        assert fields["session_remaining_sec"] == 100.0
+        assert fields["session_elapsed_sec"] == 100.0
+
+    def test_session_budget_fields_exhausted(self) -> None:
+        fields = orchestrator._session_budget_fields(
+            deadline_at=1000.0, now=1000.5, budget_sec=200.0
+        )
+        assert fields["session_timed_out"] is True
+        assert fields["session_remaining_sec"] <= 0
+
+    def test_session_deadline_from_state_rejects_garbage(self) -> None:
+        assert orchestrator._session_deadline_from_state({}) is None
+        assert orchestrator._session_deadline_from_state({"session_deadline_at": True}) is None
+        assert orchestrator._session_deadline_from_state({"session_deadline_at": "abc"}) is None
+        assert orchestrator._session_deadline_from_state({"session_deadline_at": 1234}) == 1234.0
+        assert orchestrator._session_deadline_from_state({"session_deadline_at": 1234.5}) == 1234.5
+
+    # ── ⑤ _save_state cmp-key persistence (CT-1: deadline-only change must land) ──
+
+    def test_save_state_persists_deadline_only_change(self, tmp_path: Path, monkeypatch) -> None:
+        _configure_loop_paths(monkeypatch, tmp_path)
+        state_file = tmp_path / ".loop" / "state.json"
+        initial: dict[str, object] = {
+            "state": "idle",
+            "round": 1,
+            "task_id": "T-WD-1",
+            "run_id": "run-wd-1",
+        }
+        orchestrator._save_state(initial)
+
+        time.sleep(0.02)
+        initial["session_deadline_at"] = 1234567890.123
+        orchestrator._save_state(initial)
+
+        on_disk = json.loads(state_file.read_text(encoding="utf-8"))
+        assert on_disk.get("session_deadline_at") == 1234567890.123
+
+        mtime_second = state_file.stat().st_mtime_ns
+        time.sleep(0.02)
+        orchestrator._save_state(initial)  # unchanged -> cmp shortcut skips write
+        assert state_file.stat().st_mtime_ns == mtime_second
+
+    # ── W-1 arm/deadline persistence ──
+
+    def test_arm_session_budget_writes_state_and_emits_event(self, tmp_path: Path, monkeypatch) -> None:
+        _configure_loop_paths(monkeypatch, tmp_path)
+        events: list[tuple[str, str, dict]] = []
+        monkeypatch.setattr(
+            orchestrator,
+            "_feed_event",
+            lambda event, level="info", data=None, paths=None: events.append((event, level, dict(data or {}))),
+        )
+        monkeypatch.setattr(orchestrator, "_log", lambda msg: None)
+
+        deadline = orchestrator._arm_session_budget_deadline(
+            orchestrator.RunConfig(task_path=str(tmp_path / "task.json"), session_timeout_sec=120)
+        )
+
+        assert deadline is not None and deadline > time.time() + 115
+        on_disk = json.loads((tmp_path / ".loop" / "state.json").read_text(encoding="utf-8"))
+        assert on_disk.get("session_deadline_at") == deadline
+        assert any(e == orchestrator.FEED_SESSION_BUDGET for e, _, _ in events)
+
+    def test_arm_session_budget_disabled_returns_none(self) -> None:
+        assert orchestrator._arm_session_budget_deadline(orchestrator.RunConfig()) is None
+
+    # ── ② W-4: attempt-level gate blocks before any Popen ──
+
+    def test_auto_dispatch_session_budget_blocks_before_spawn(self, tmp_path: Path, monkeypatch) -> None:
+        _configure_loop_paths(monkeypatch, tmp_path)
+        events: list[tuple[str, str, dict]] = []
+        monkeypatch.setattr(
+            orchestrator,
+            "_feed_event",
+            lambda event, level="info", data=None, paths=None: events.append((event, level, dict(data or {}))),
+        )
+        monkeypatch.setattr(orchestrator, "_log", lambda msg: None)
+        popen_calls: list[object] = []
+        monkeypatch.setattr(
+            orchestrator.subprocess,
+            "Popen",
+            lambda *args, **kwargs: popen_calls.append((args, kwargs)),
+        )
+
+        with pytest.raises(orchestrator.DispatchTimeoutError, match="session wallclock budget exhausted"):
+            orchestrator._run_auto_dispatch(
+                "worker", "codex", "prompt", 30,
+                session_deadline_at=time.time() - 1,
+            )
+
+        assert popen_calls == []
+        timeout_events = [d for e, _lvl, d in events if e == orchestrator.FEED_SESSION_TIMEOUT]
+        assert timeout_events, "expected a session_timeout feed event"
+        assert timeout_events[0]["timeout_class"] == "session"
+
+    # ── ③ W-3: single-round fast-path self-limit ──
+
+    def test_single_round_self_limits_on_expired_deadline(self, tmp_path: Path, monkeypatch) -> None:
+        _configure_loop_paths(monkeypatch, tmp_path)
+        task_path = tmp_path / "task.json"
+        task_path.write_text(
+            json.dumps({"task_id": "T-WD-3", "goal": "watchdog"}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            orchestrator,
+            "_sync_task_card_to_bus",
+            lambda task_path, round_num=1, paths=None: ({"task_id": "T-WD-3", "goal": "watchdog"}, "T-WD-3"),
+        )
+        monkeypatch.setattr(
+            orchestrator,
+            "_load_state",
+            lambda paths=None: {"state": "idle", "round": 1, "session_deadline_at": time.time() - 1},
+        )
+        monkeypatch.setattr(orchestrator, "_write_task_card_status", lambda *args, **kwargs: None)
+        monkeypatch.setattr(orchestrator, "_archive_state_for_round", lambda *args, **kwargs: None)
+        monkeypatch.setattr(orchestrator, "_log", lambda msg: None)
+        fail_calls: list[dict[str, object]] = []
+
+        def fake_fail_with_state(state, outcome, message, exit_code=1, task_path=None, paths=None):
+            fail_calls.append({"outcome": outcome, "exit_code": exit_code})
+            raise RuntimeError(message)
+
+        monkeypatch.setattr(orchestrator, "_fail_with_state", fake_fail_with_state)
+
+        with pytest.raises(RuntimeError, match="session wallclock budget exhausted"):
+            orchestrator._run_single_round(
+                config=orchestrator.RunConfig(task_path=str(task_path), session_timeout_sec=60),
+                round_num=1,
+                single_round=True,
+            )
+
+        assert fail_calls[0]["outcome"] == "session_timeout"
+        assert fail_calls[0]["exit_code"] == orchestrator.EXIT_TIMEOUT
+
+    # ── ④ + ⑥ W-2 parent round-loop checkpoint (T-3263-a historical replay) ──
+
+    def test_parent_loop_budget_caps_rounds_and_reuses_terminate_wait_chain(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        _configure_loop_paths(monkeypatch, tmp_path)
+        task_path = tmp_path / "task.json"
+        task_path.write_text(
+            json.dumps({"task_id": "T-WD-6", "goal": "watchdog"}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        orchestrator._save_state(
+            {"state": orchestrator.STATE_IDLE, "round": 0, "task_id": "T-WD-6", "run_id": "run-wd-6"}
+        )
+        monkeypatch.setattr(orchestrator, "_enforce_clean_worktree_or_exit", lambda allow_dirty: None)
+        monkeypatch.setattr(orchestrator, "_current_sha", lambda: "base-sha")
+        monkeypatch.setattr(orchestrator, "_write_task_card_status", lambda *args, **kwargs: None)
+        monkeypatch.setattr(orchestrator, "_prepare_bus_file", lambda *args, **kwargs: None)
+        monkeypatch.setattr(orchestrator, "_archive_bus_file", lambda *args, **kwargs: None)
+
+        feed_events: list[tuple[str, str, dict]] = []
+        monkeypatch.setattr(
+            orchestrator,
+            "_feed_event",
+            lambda event, level="info", data=None, paths=None: feed_events.append((event, level, dict(data or {}))),
+        )
+
+        proc_log: list[str] = []
+        popen_count = {"n": 0}
+
+        class _FakeLiveProc:
+            returncode: int | None = None
+
+            def poll(self):
+                return self.returncode
+
+            def terminate(self):
+                proc_log.append("terminate")
+
+            def wait(self, timeout=None):
+                _ = timeout
+                proc_log.append("wait")
+                self.returncode = 0
+                return 0
+
+        def fake_popen(*args, **kwargs):
+            _ = (args, kwargs)
+            popen_count["n"] += 1
+            return _FakeLiveProc()
+
+        monkeypatch.setattr(orchestrator.subprocess, "Popen", fake_popen)
+
+        def fake_collect(proc, *, stdout_line_callback=None):
+            _ = (proc, stdout_line_callback)
+            time.sleep(2.0)  # pushes the session past its wallclock budget
+            return ("", "", 0)
+
+        monkeypatch.setattr(orchestrator, "_collect_streamed_text_output", fake_collect)
+        monkeypatch.setattr(
+            orchestrator,
+            "_dispatch_post_round",
+            lambda state, round_num, normalized: orchestrator._post_round_handle_awaiting_next_round,
+        )
+
+        captured: dict[str, object] = {}
+
+        def fake_fail_with_state(state, outcome, message, exit_code=1, task_path=None, paths=None):
+            captured["outcome"] = outcome
+            captured["exit_code"] = exit_code
+            captured["message"] = message
+            raise SystemExit(exit_code)
+
+        monkeypatch.setattr(orchestrator, "_fail_with_state", fake_fail_with_state)
+
+        orchestrator._arm_session_budget_deadline(
+            orchestrator.RunConfig(task_path=str(task_path), session_timeout_sec=1)
+        )
+
+        with pytest.raises(SystemExit) as exc:
+            orchestrator._run_multi_round_via_subprocess(
+                config=orchestrator.RunConfig(
+                    task_path=str(task_path), max_rounds=2, allow_dirty=True, session_timeout_sec=1
+                ),
+            )
+
+        assert exc.value.code == orchestrator.EXIT_TIMEOUT
+        assert captured["outcome"] == "session_timeout"
+        assert captured["exit_code"] == orchestrator.EXIT_TIMEOUT
+        # Round 1 spawned exactly one child; round 2 was blocked at the parent
+        # loop head (W-2) before any new Popen — the historical 3x-timeout
+        # pattern is now capped by the session budget.
+        assert popen_count["n"] == 1
+        # Existing cleanup chain order: terminate -> wait (no new kill mechanisms).
+        assert proc_log == ["terminate", "wait"]
+        names = [e for e, _lvl, _d in feed_events]
+        assert orchestrator.FEED_SESSION_BUDGET in names
+        assert orchestrator.FEED_SESSION_TIMEOUT in names
+        timeout_datas = [d for e, _lvl, d in feed_events if e == orchestrator.FEED_SESSION_TIMEOUT]
+        assert any(d.get("timeout_class") == "session" for d in timeout_datas)
+
+
 class TestConfigUnknownKeyWarning:
     def test_unknown_config_key_logs_warning(self, tmp_path: Path, monkeypatch) -> None:
         _configure_loop_paths(monkeypatch, tmp_path)
