@@ -12696,9 +12696,16 @@ def cmd_run(
     try:
         _validate_run_config(config)
         lock: _LoopLock | None = None
+        repo_lock: _LoopLock | None = None
+        # Lock order is fixed repo-level → loop-dir to prevent ABBA deadlock.
         # Single-round subprocesses are spawned by the parent loop which already
-        # holds the lock — skip lock acquisition to avoid self-deadlock.
+        # holds both locks, skip lock acquisition to avoid self-deadlock.
         if not single_round:
+            try:
+                repo_lock = _acquire_repo_lock(paths=resolved_paths)
+            except RuntimeError as e:
+                print(f"Error: {e}", file=sys.stderr)
+                raise StateError(str(e)) from e
             try:
                 lock = _acquire_run_lock(paths=resolved_paths)
             except RuntimeError as e:
@@ -12778,6 +12785,8 @@ def cmd_run(
         finally:
             if lock is not None:
                 lock.release()
+            if repo_lock is not None:
+                repo_lock.release()
     except DirtyWorktreeError:
         sys.exit(EXIT_DIRTY_WORKTREE)
     except StateError as e:
