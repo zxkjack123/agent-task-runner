@@ -419,6 +419,9 @@ def test_main_init_creates_prompt_templates_in_loop_dir(tmp_path: Path, monkeypa
     assert "{quickstart_section}" in worker_template
     assert "{handoff_section}" in worker_template
     assert "{handoff_section}" in reviewer_template
+    assert "=== SKILL LOADING ===" in worker_template
+    assert "/home/gw/opt/copilot-agents/skills/index.md" in worker_template
+    assert "=== SKILL LOADING ===" not in reviewer_template
     assert (tmp_path / "my-loop" / "handoff").exists()
     module_map_path = (tmp_path / "my-loop" / "context" / "module_map.json").resolve()
     module_map = json.loads(module_map_path.read_text(encoding="utf-8"))
@@ -2445,6 +2448,35 @@ def test_worker_prompt_round1_includes_quickstart_context(monkeypatch) -> None:
     assert "single-file orchestrator architecture" in prompt
     assert "state.json is the single source of truth" in prompt
     assert "- state contract" in prompt
+
+
+def test_worker_prompt_rendered_includes_skill_loading(monkeypatch) -> None:
+    def fake_read(path: Path) -> str | None:
+        if path == orchestrator._worker_prompt_template_path():
+            return orchestrator.DEFAULT_WORKER_PROMPT_TEMPLATE
+        if path.name == "AGENTS.md":
+            return "AGENTS_CONTENT"
+        if path.name == "code-writer.md":
+            return "CODE_WRITER_CONTENT"
+        return None
+
+    def fake_read_json(path: Path) -> dict | None:
+        _ = path
+        return {
+            "goal": "Skill loading payload",
+            "in_scope": [],
+            "out_of_scope": [],
+            "acceptance_criteria": [],
+            "constraints": [],
+        }
+
+    monkeypatch.setattr(orchestrator, "_read_text_optional", fake_read)
+    monkeypatch.setattr(orchestrator, "_read_json_if_exists", fake_read_json)
+
+    prompt = orchestrator._worker_prompt("T-603", 1)
+
+    assert "=== SKILL LOADING ===" in prompt
+    assert "/home/gw/opt/copilot-agents/skills/index.md" in prompt
 
 
 def test_worker_prompt_round2_includes_prior_round_context(monkeypatch) -> None:

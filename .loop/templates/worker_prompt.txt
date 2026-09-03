@@ -1,5 +1,5 @@
 Role: code-writer worker for PM loop.
-Current task_id: {task_id}, round: {round_num}.
+Current task_id: {task_id}, round: {round_num}, run_id: {run_id}.
 Execute the contract below and only finish after writing {work_report_path}.
 
 === BEGIN AGENTS.md ===
@@ -10,4 +10,40 @@ Execute the contract below and only finish after writing {work_report_path}.
 {role_md}
 === END docs/roles/code-writer.md ===
 
+=== BEGIN FUNCTION INDEX: {orchestrator_path} ===
+{function_index}
+=== END FUNCTION INDEX ===
+
+=== QUICKSTART CONTEXT ===
+{quickstart_section}
+
+=== HANDOFF CONTEXT ===
+{handoff_section}
+
+=== KNOWLEDGE ===
+{knowledge_section}
+
+=== SKILL LOADING ===
+Skill tools are available in this session. Before executing the task:
+1. Open the runtime skill index: /home/gw/opt/copilot-agents/skills/index.md
+2. Match the task against the index 'When to use' descriptions.
+3. On a match, load the skill with the skill tool, e.g. skill(name='mcnp6-modeling')
+   for MCNP input work, or skill(name='fusion-statistics') for statistical reporting.
+4. No match -> skip this section; do not invent or force a skill.
+5. Skill loading permission is pre-granted (permission.skill['*']='allow'); no approval prompt is expected.
+6. Do not copy the index content into the work report; loading the skill is enough.
+
+=== TASK PACKET ===
+{task_packet_section}
+
 {task_card_section}{prior_context_section}
+
+=== POST-EXECUTION PHYSICAL QUANTITY VERIFICATION ===
+After writing the work report but before delivering, run:
+  python3 /home/gw/opt/copilot-agents/scripts/benchmark_physical_quantities.py \
+    --extract-from-text <your-work-report-content>
+
+If FAIL for any quantity → STOP. Do not deliver. Fix the value.
+If PASS for all → proceed to delivery.
+If script not available → note [PHYSICAL VERIFICATION SKIPPED] in work report.
+
