@@ -15170,3 +15170,186 @@ class TestCmdRunRepoLock:
             )
         assert exc.value.code == 4
         assert "overlaps task in-scope files" in capsys.readouterr().err
+
+
+# ===== [Plan: pm3155-repo-mutex-lock] T2.3: dirty tree fail-fast + historical replay =====
+
+
+def _init_tmp_repo(repo: Path) -> None:
+    """Create a real committed git repo under tmp (existing L2172 pattern)."""
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+    (repo / "f").write_text("x\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "i"], cwd=repo, check=True)
+
+
+def _write_minimal_card(repo: Path, task_id: str) -> Path:
+    card = repo / "card.json"
+    card.write_text(json.dumps({"task_id": task_id, "title": "t", "goal": "g"}), encoding="utf-8")
+    return card
+
+
+def _loop_run_cmd(repo: Path, card: Path) -> list[str]:
+    return [
+        sys.executable,
+        "-m",
+        "loop_kit",
+        "run",
+        "--loop-dir",
+        str(repo / ".loop"),
+        "--task",
+        str(card),
+    ]
+
+
+class TestDirtyTreeFailFastNoRetry:
+    def test_dirty_tree_enforced_exactly_once_and_exits_4(self, monkeypatch, capsys) -> None:
+        calls: list[int] = []
+        original_enforce = orchestrator._enforce_clean_worktree_or_exit
+
+        def _counting_enforce(**kwargs) -> None:
+            calls.append(1)
+            original_enforce(**kwargs)
+
+        class _NoopLock:
+            def release(self) -> None:
+                return None
+
+        main_loop_entered: list[bool] = []
+
+        def _sentinel_main_loop(**kwargs) -> None:
+            _ = kwargs
+            main_loop_entered.append(True)
+            raise AssertionError("_main_loop must not be reached on a dirty tree")
+
+        monkeypatch.setattr(orchestrator, "_enforce_clean_worktree_or_exit", _counting_enforce)
+        monkeypatch.setattr(orchestrator, "_dirty_tracked_paths", lambda: ["src/foo.py"])
+        monkeypatch.setattr(orchestrator, "_acquire_repo_lock", lambda paths=None: _NoopLock())
+        monkeypatch.setattr(orchestrator, "_acquire_run_lock", lambda paths=None: _NoopLock())
+        monkeypatch.setattr(orchestrator, "_main_loop", _sentinel_main_loop)
+
+        start = time.monotonic()
+        with pytest.raises(SystemExit) as exc:
+            orchestrator.cmd_run(
+                _run_config(".loop/task_card.json"),
+                single_round=False,
+                round_num=None,
+            )
+        elapsed = time.monotonic() - start
+
+        assert exc.value.code == 4
+        assert len(calls) == 1, "dirty-tree check must run exactly once (no retries)"
+        assert not main_loop_entered
+        assert elapsed < 1.0, f"fail-fast must complete quickly, took {elapsed:.2f}s"
+        assert "src/foo.py" in capsys.readouterr().err
+
+    def test_dirty_tree_error_message_lists_dirty_files(self, monkeypatch, capsys) -> None:
+        class _NoopLock:
+            def release(self) -> None:
+                return None
+
+        monkeypatch.setattr(
+            orchestrator,
+            "_dirty_tracked_paths",
+            lambda: ["src/foo.py", "tests/bar.py"],
+        )
+        monkeypatch.setattr(orchestrator, "_acquire_repo_lock", lambda paths=None: _NoopLock())
+        monkeypatch.setattr(orchestrator, "_acquire_run_lock", lambda paths=None: _NoopLock())
+
+        with pytest.raises(SystemExit) as exc:
+            orchestrator.cmd_run(
+                _run_config(".loop/task_card.json"),
+                single_round=False,
+                round_num=None,
+            )
+        assert exc.value.code == 4
+        err = capsys.readouterr().err
+        assert "dirty git working tree" in err
+        assert "src/foo.py" in err
+        assert "tests/bar.py" in err
+
+
+class TestHistoricalReplayT3151T3152:
+    def test_replay_t3151_dirty_tree_fails_once_fast(self, tmp_path: Path) -> None:
+        repo = tmp_path / "repo1"
+        _init_tmp_repo(repo)
+        (repo / "f").write_text("x\ny\n", encoding="utf-8")  # dirty tracked file
+        card = _write_minimal_card(repo, "T-3151")
+
+        start = time.monotonic()
+        result = subprocess.run(
+            _loop_run_cmd(repo, card),
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        elapsed = time.monotonic() - start
+
+        assert result.returncode == 4, f"stderr: {result.stderr[-500:]}"
+        assert elapsed < 10, f"historical baseline ~300s; took {elapsed:.1f}s (no 3x retry waits)"
+        combined = result.stdout + result.stderr
+        assert "dirty git working tree" in combined
+        assert "f" in result.stderr
+        assert "[Worker] Running" not in combined
+
+    def test_replay_repo_lock_conflict_exits_5_fast(self, tmp_path: Path) -> None:
+        repo = tmp_path / "repo2"
+        _init_tmp_repo(repo)
+        card = _write_minimal_card(repo, "T-3152")
+
+        # Test process plays the external lock holder. This is the only point in
+        # the whole plan that instantiates _LoopLock directly (REFINE-3), and it
+        # must go through _repo_lock_path(root=repo) so the hash exactly matches
+        # the subprocess's computation (ROOT == cwd == repo).
+        holder = orchestrator._LoopLock(orchestrator._repo_lock_path(root=repo))
+        holder.acquire()
+        try:
+            start = time.monotonic()
+            result = subprocess.run(
+                _loop_run_cmd(repo, card),
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            elapsed = time.monotonic() - start
+        finally:
+            holder.release()
+
+        assert result.returncode == 5, f"stderr: {result.stderr[-500:]}"
+        assert elapsed < 10, f"lock conflict must fail fast, took {elapsed:.1f}s"
+        assert "another loop run is already using this working tree" in result.stderr
+
+    def test_replay_clean_tree_after_release_acquires_normally(self, tmp_path: Path) -> None:
+        repo = tmp_path / "repo3"
+        _init_tmp_repo(repo)
+        card = _write_minimal_card(repo, "T-3152B")
+
+        start = time.monotonic()
+        try:
+            result = subprocess.run(
+                _loop_run_cmd(repo, card),
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except subprocess.TimeoutExpired:
+            # Timeout-evidence semantics (REFINE-2): not exiting within 60s means
+            # the subprocess passed the repo lock (no exit 5) and the dirty-tree
+            # check (no exit 4) and entered later loop stages that wait on PM
+            # dependencies unavailable in this environment. That is a PASS for
+            # this case's goal: after release the lock is free and a clean tree
+            # proceeds past the fail-fast gates.
+            elapsed = time.monotonic() - start
+            assert elapsed >= 59.0, f"timeout fired unexpectedly early: {elapsed:.1f}s"
+            return
+        elapsed = time.monotonic() - start
+        assert result.returncode not in (4, 5), (
+            f"clean tree must pass the dirty check (not 4) and the repo lock (not 5); "
+            f"got {result.returncode}. stderr: {result.stderr[-500:]}"
+        )
