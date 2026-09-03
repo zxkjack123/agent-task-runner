@@ -27,6 +27,7 @@ import signal
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -1327,6 +1328,83 @@ def _cleanup_stale_lock(lock_path: Path) -> None:
         with contextlib.suppress(OSError):
             lock_path.unlink()
         _log(f"Cleaned up orphan lock file from PID {lock_pid}: {lock_path}")
+
+
+_REPO_LOCK_DIR_NAME = "loop-kit-repo-locks"
+
+
+def _repo_lock_root_for(root: Path) -> Path:
+    """Resolve the canonical repo root used for lock hashing."""
+    if _is_git_repo_root(root):
+        try:
+            toplevel = _git_at(root, "rev-parse", "--show-toplevel")
+        except RuntimeError:
+            pass
+        else:
+            if toplevel.strip():
+                return Path(toplevel.strip()).resolve()
+    return root.resolve()
+
+
+def _repo_lock_path(root: Path | None = None) -> Path:
+    """Repo-level mutex lock path: /tmp/loop-kit-repo-locks/<sha256(root)>.lock."""
+    resolved = _repo_lock_root_for(root if root is not None else ROOT)
+    digest = hashlib.sha256(str(resolved).encode("utf-8")).hexdigest()
+    lock_dir = Path(tempfile.gettempdir()) / _REPO_LOCK_DIR_NAME
+    return lock_dir / f"{digest}.lock"
+
+
+def _repo_lock_diagnostic(lock_path: Path) -> str:
+    """Best-effort holder description; never raises, content never executed."""
+    try:
+        first = lock_path.read_text(encoding="utf-8", errors="replace")[:64].split("\n")[0]
+        if first.startswith("pid:"):
+            pid = int(first[4:].strip())
+            if pid != os.getpid() and _pid_is_live(pid):
+                return f"held by pid {pid}"
+            return f"stale or reused pid record ({pid})"
+    except (OSError, ValueError, IndexError):
+        pass
+    return "holder unknown"
+
+
+def _pid_is_live(pid: int) -> bool:
+    """PID liveness probe: kill(pid, 0). Diagnostics only; never gates locking.
+
+    REFINE-2 simplification: the /proc/<pid>/stat start-time comparison was
+    removed as dead code — the lock file records only ``pid:`` (no recorded
+    start-ticks side to compare against), so that check was a tautology.
+    """
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _acquire_repo_lock(paths: LoopPaths | None = None) -> _LoopLock:
+    """Acquire the repo-level mutex. flock is the sole authority.
+
+    Never unlinks the lock file (avoids the unlink->recreate inode race present
+    in the legacy loop-dir cleanup path). PID record is overwritten after a
+    successful acquisition; on conflict it is read for diagnostics only.
+    """
+    _ = paths  # interface symmetry with _acquire_run_lock
+    lock_path = _repo_lock_path()
+    try:
+        lock = _LoopLock(lock_path)
+        lock.acquire()
+    except RuntimeError as e:
+        holder = _repo_lock_diagnostic(lock_path)
+        raise RuntimeError(
+            f"another loop run is already using this working tree "
+            f"({holder}) (lock: {lock_path})"
+        ) from e
+    except OSError as e:
+        raise RuntimeError(f"repo lock unavailable ({lock_path}): {e}") from e
+    with contextlib.suppress(OSError):
+        lock_path.write_text(f"pid:{os.getpid()}\n", encoding="utf-8")
+    return lock
 
 
 def _heartbeat_path(role: str, paths: LoopPaths | None = None) -> Path:
