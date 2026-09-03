@@ -533,6 +533,10 @@ _KNOWN_CONFIG_KEYS: frozenset[str] = frozenset({
     "worker_noop_evidence_gating",
     "allow_dirty",
     "clean_stale",
+    "session_timeout_sec",
+    "context_token_budget",
+    "context_token_warn_pct",
+    "task_mode",
     "cwd",
     "outcome_file",
     "verbose",
@@ -615,6 +619,14 @@ class RunConfig:
     cwd: str | None = None
     outcome_file: str | None = None
     verbose: bool = False
+    # ── PM #3263: session context budget & timeout watchdog ──
+    # All defaults are "disabled" (0 / None): zero behavior drift for
+    # existing sessions. The authoritative task-mode value lives on the task
+    # card `mode` key; RunConfig.task_mode is a debug override only.
+    session_timeout_sec: int = 0
+    context_token_budget: int = 0
+    context_token_warn_pct: int = 80
+    task_mode: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -8849,9 +8861,39 @@ def _validate_run_config(config: RunConfig) -> None:
         ("max_session_rounds", config.max_session_rounds, 0),
         ("max_parallel_workers", config.max_parallel_workers, 1),
         ("artifact_timeout", config.artifact_timeout, 0),
+        ("session_timeout_sec", config.session_timeout_sec, 0),
+        ("context_token_budget", config.context_token_budget, 0),
     )
     for field_name, value, minimum in int_rules:
         _coerce_int_config(value, field_name=field_name, minimum=minimum)
+    # PM #3263: the warn threshold is clamped into [0, 100] instead of
+    # raising, so legacy config files / env values cannot break startup
+    # (the budget fields above still hard-fail on negatives).
+    warn_pct_raw = config.context_token_warn_pct
+    if isinstance(warn_pct_raw, bool):
+        raise ValidationError(
+            f"context_token_warn_pct must be an integer, got {warn_pct_raw!r}"
+        )
+    if isinstance(warn_pct_raw, str):
+        try:
+            warn_pct = int(warn_pct_raw.strip())
+        except ValueError as e:
+            raise ValidationError(
+                f"context_token_warn_pct must be an integer, got {warn_pct_raw!r}"
+            ) from e
+    elif isinstance(warn_pct_raw, int):
+        warn_pct = warn_pct_raw
+    else:
+        raise ValidationError(
+            f"context_token_warn_pct must be an integer, got {warn_pct_raw!r}"
+        )
+    if warn_pct < 0 or warn_pct > 100:
+        clamped = max(0, min(100, warn_pct))
+        _log(
+            f"context_token_warn_pct out of range [0, 100] ({warn_pct}); "
+            f"clamped to {clamped}"
+        )
+        config.context_token_warn_pct = clamped
     for bool_name, value in (
         ("require_heartbeat", config.require_heartbeat),
         ("auto_dispatch", config.auto_dispatch),
@@ -8936,6 +8978,9 @@ def _load_env_config() -> dict:
         ("LOOP_ALLOW_DIRTY", "allow_dirty"),
         ("LOOP_VERBOSE", "verbose"),
         ("LOOP_REQUIRE_HEARTBEAT", "require_heartbeat"),
+        ("LOOP_SESSION_TIMEOUT", "session_timeout_sec"),
+        ("LOOP_CONTEXT_TOKEN_BUDGET", "context_token_budget"),
+        ("LOOP_CONTEXT_TOKEN_WARN_PCT", "context_token_warn_pct"),
     ):
         raw = os.getenv(env_var)
         if raw is not None and raw.strip():

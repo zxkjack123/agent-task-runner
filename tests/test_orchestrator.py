@@ -13866,6 +13866,68 @@ class TestReportUnknownKeyWarning:
         assert result is None
 
 
+class TestBudgetConfig:
+    """PM #3263 T1.1: session context budget config model (all default-disabled)."""
+
+    def test_env_vars_populate_load_env_config(self, monkeypatch) -> None:
+        for var in (
+            "LOOP_SESSION_TIMEOUT",
+            "LOOP_CONTEXT_TOKEN_BUDGET",
+            "LOOP_CONTEXT_TOKEN_WARN_PCT",
+        ):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("LOOP_SESSION_TIMEOUT", "120")
+        monkeypatch.setenv("LOOP_CONTEXT_TOKEN_BUDGET", "50000")
+        monkeypatch.setenv("LOOP_CONTEXT_TOKEN_WARN_PCT", "70")
+
+        env_cfg = orchestrator._load_env_config()
+
+        assert env_cfg["session_timeout_sec"] == "120"
+        assert env_cfg["context_token_budget"] == "50000"
+        assert env_cfg["context_token_warn_pct"] == "70"
+
+    def test_negative_session_timeout_raises_validation_error(self) -> None:
+        config = orchestrator.RunConfig(session_timeout_sec=-1)
+
+        with pytest.raises(orchestrator.ValidationError, match="session_timeout_sec"):
+            orchestrator._validate_run_config(config)
+
+    def test_negative_context_budget_raises_validation_error(self) -> None:
+        config = orchestrator.RunConfig(context_token_budget=-5)
+
+        with pytest.raises(orchestrator.ValidationError, match="context_token_budget"):
+            orchestrator._validate_run_config(config)
+
+    def test_warn_pct_over_100_is_clamped_with_warning(self, monkeypatch) -> None:
+        warnings: list[str] = []
+        monkeypatch.setattr(orchestrator, "_log", lambda msg: warnings.append(msg))
+        config = orchestrator.RunConfig(context_token_warn_pct=150)
+
+        orchestrator._validate_run_config(config)
+
+        assert config.context_token_warn_pct == 100
+        assert any("clamped" in w and "150" in w for w in warnings)
+
+    def test_warn_pct_negative_is_clamped_to_zero(self, monkeypatch) -> None:
+        warnings: list[str] = []
+        monkeypatch.setattr(orchestrator, "_log", lambda msg: warnings.append(msg))
+        config = orchestrator.RunConfig(context_token_warn_pct=-3)
+
+        orchestrator._validate_run_config(config)
+
+        assert config.context_token_warn_pct == 0
+        assert any("clamped" in w for w in warnings)
+
+    def test_default_runconfig_budget_fields_disabled(self) -> None:
+        config = orchestrator.RunConfig()
+        assert config.session_timeout_sec == 0
+        assert config.context_token_budget == 0
+        assert config.context_token_warn_pct == 80
+        assert config.task_mode is None
+
+        orchestrator._validate_run_config(config)
+
+
 class TestConfigUnknownKeyWarning:
     def test_unknown_config_key_logs_warning(self, tmp_path: Path, monkeypatch) -> None:
         _configure_loop_paths(monkeypatch, tmp_path)
