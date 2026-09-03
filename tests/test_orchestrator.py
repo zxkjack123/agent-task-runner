@@ -14520,6 +14520,69 @@ class TestTaskCardModeAndPatchContract:
         assert orchestrator.EXIT_PLAN_PATCH_VIOLATION == 6
 
 
+class TestPlanPatchContractRendering:
+    """PM #3263 T2.2: dynamic contract section in the task-card prompt."""
+
+    def test_patch_mode_renders_contract_with_whitelist(self) -> None:
+        card: dict[str, object] = {
+            "mode": "patch",
+            "plan_patch": {
+                "allowed_files": [".github/plans/x.md", "docs/y.md"],
+                "allowed_anchors": [{"file": ".github/plans/x.md", "line": 12}],
+            },
+        }
+
+        rendered = orchestrator._render_task_card_section(card)
+
+        assert "=== PLAN PATCH CONTRACT ===" in rendered
+        assert "- .github/plans/x.md" in rendered
+        assert "- docs/y.md" in rendered
+        assert ".github/plans/x.md:12" in rendered
+
+    def test_generate_mode_does_not_render_contract(self) -> None:
+        card: dict[str, object] = {
+            "mode": "generate",
+            "plan_patch": {"allowed_files": [".github/plans/x.md"]},
+        }
+
+        rendered = orchestrator._render_task_card_section(card)
+
+        assert "=== PLAN PATCH CONTRACT ===" not in rendered
+
+    def test_no_contract_returns_empty(self) -> None:
+        assert orchestrator._render_plan_patch_contract({"mode": "patch"}) == ""
+        assert orchestrator._render_plan_patch_contract({"mode": "generate"}) == ""
+        assert orchestrator._render_plan_patch_contract({}) == ""
+
+    def test_rendered_contract_includes_forbid_new_files_state(self) -> None:
+        card: dict[str, object] = {
+            "mode": "patch",
+            "plan_patch": {
+                "allowed_files": ["a.md"],
+                "forbid_new_files": False,
+            },
+        }
+
+        contract = orchestrator._render_plan_patch_contract(card)
+
+        assert "forbid_new_files: false" in contract
+
+    def test_contract_text_has_no_braces(self) -> None:
+        card: dict[str, object] = {
+            "mode": "patch",
+            "plan_patch": {
+                "allowed_files": ["a.md"],
+                "allowed_anchors": [{"file": "a.md", "heading": "Phase 2"}],
+                "forbid_new_files": True,
+            },
+        }
+
+        contract = orchestrator._render_plan_patch_contract(card)
+
+        assert "{" not in contract and "}" not in contract
+        assert "a.md:heading=Phase 2" in contract
+
+
 class TestConfigUnknownKeyWarning:
     def test_unknown_config_key_logs_warning(self, tmp_path: Path, monkeypatch) -> None:
         _configure_loop_paths(monkeypatch, tmp_path)

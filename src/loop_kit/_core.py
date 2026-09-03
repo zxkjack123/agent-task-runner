@@ -5926,6 +5926,50 @@ def _function_index(path: Path) -> str:
     return result
 
 
+def _render_plan_patch_contract(task_card: TaskCard) -> str:
+    """Render the plan-patch whitelist contract (PM #3263 D4).
+
+    Active only for ``mode == "patch"``. Pure string concatenation — no
+    ``.format()`` — so whitelist content can never be interpreted as template
+    syntax. This section is a behavior guide for the worker; the deterministic
+    hard gate is ``_verify_plan_patch_scope`` (fail-closed, D5).
+    """
+    if task_card.get("mode") != "patch":
+        return ""
+    plan_patch = task_card.get("plan_patch")
+    if not isinstance(plan_patch, dict):
+        return ""
+    allowed_files = plan_patch.get("allowed_files")
+    if not isinstance(allowed_files, list):
+        return ""
+    lines = ["=== PLAN PATCH CONTRACT ==="]
+    lines.append("allowed_files (whitelist):")
+    for item in allowed_files:
+        if isinstance(item, str) and item.strip():
+            lines.append("- " + item)
+    allowed_anchors = plan_patch.get("allowed_anchors")
+    if isinstance(allowed_anchors, list) and allowed_anchors:
+        lines.append("allowed_anchors:")
+        for anchor in allowed_anchors:
+            if not isinstance(anchor, dict):
+                continue
+            anchor_file = anchor.get("file")
+            if not isinstance(anchor_file, str) or not anchor_file.strip():
+                continue
+            if isinstance(anchor.get("line"), int) and not isinstance(anchor.get("line"), bool):
+                lines.append("- " + anchor_file + ":" + str(anchor["line"]))
+            elif isinstance(anchor.get("heading"), str) and anchor["heading"].strip():
+                lines.append("- " + anchor_file + ":heading=" + anchor["heading"].strip())
+    forbid_new_files = plan_patch.get("forbid_new_files", True)
+    lines.append("forbid_new_files: " + str(bool(forbid_new_files)).lower())
+    lines.append("You MUST NOT modify any file outside the allowed_files whitelist.")
+    lines.append("You MUST NOT modify sections of the plan file beyond the allowed_anchors.")
+    if forbid_new_files is not False:
+        lines.append("You MUST NOT create new files outside the whitelist.")
+    lines.append("Violations are rejected by post-verification and are NOT retried (fail-closed).")
+    return "\n".join(lines) + "\n"
+
+
 def _render_task_card_section(task_card: TaskCard) -> str:
     lanes_raw = task_card.get("lanes")
     lanes_lines: list[str] = []
@@ -5933,7 +5977,7 @@ def _render_task_card_section(task_card: TaskCard) -> str:
         for lane in lanes_raw:
             if isinstance(lane, dict):
                 lanes_lines.append(json.dumps(lane, ensure_ascii=False))
-    return (
+    section = (
         "=== TASK CARD ===\n"
         f"goal: {task_card.get('goal', '<none>')}\n"
         "in_scope:\n"
@@ -5949,6 +5993,13 @@ def _render_task_card_section(task_card: TaskCard) -> str:
         "constraints:\n"
         f"{_as_prompt_list(task_card.get('constraints'))}\n"
     )
+    # PM #3263 D4: the plan-patch contract rides the task-card section as a
+    # dynamic append — DEFAULT_WORKER_PROMPT_TEMPLATE and the materialized
+    # template file stay untouched (#3135 byte-level acceptance preserved).
+    contract = _render_plan_patch_contract(task_card)
+    if contract:
+        section += "\n" + contract
+    return section
 
 
 def _render_quickstart_context_section(task_card: TaskCard) -> str:
