@@ -236,6 +236,34 @@ def test_collect_streamed_process_output_returns_when_grandchild_holds_pipe(tmp_
         _kill_pidfile_process(pidfile)
 
 
+def test_collect_streamed_text_output_returns_when_grandchild_holds_pipe(tmp_path: Path) -> None:
+    pidfile = tmp_path / "grandchild.pid"
+    proc = subprocess.Popen(
+        [sys.executable, "-c", _grandchild_pipe_holder_script(0), str(pidfile)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+    )
+    try:
+        start = time.monotonic()
+        stdout, stderr, returncode = orchestrator._collect_streamed_text_output(proc)
+        elapsed = time.monotonic() - start
+        # Grandchild holds both pipes for ~15s; the symmetric bounded-reader
+        # hardening (PM #3351) must return in ~4s (two 2.0s bounded joins),
+        # not block on the stdout/stderr reader threads.
+        assert elapsed < 10.0, f"collector blocked {elapsed:.1f}s on grandchild-held pipe"
+        assert isinstance(stdout, str)
+        assert isinstance(stderr, str)
+        assert returncode == 0
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=5)
+        _kill_pidfile_process(pidfile)
+
+
 def test_run_auto_dispatch_retry_exhaustion_terminates_despite_pipe_hold(tmp_path: Path, monkeypatch) -> None:
     pidfile = tmp_path / "grandchild.pid"
     monkeypatch.setattr(
