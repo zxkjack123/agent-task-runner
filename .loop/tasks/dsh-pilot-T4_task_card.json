@@ -1,0 +1,27 @@
+{
+  "task_id": "dsh-pilot-T4",
+  "goal": "在 coupling/dsh-pilot/ 下实现 fib 模块（迭代版 fib(n) 函数，n>=0 返回 int，n<0 抛 ValueError）并通过配套 pytest 测试（工作区无独立 .venv：运行测试用 /home/gw/opt/agent-task-runner/.venv/bin/python -m pytest，勿依赖 uv run）",
+  "in_scope": ["coupling/dsh-pilot/fib.py", "coupling/dsh-pilot/test_fib.py"],
+  "out_of_scope": ["src/**", "tests/**", "docs/**", "scripts/**", ".loop/**", "任何既有模块"],
+  "acceptance_criteria": [
+    "coupling/dsh-pilot/test_fib.py 存在且断言 [fib(0)=0, fib(1)=1, fib(10)=55]",
+    "fib 为迭代实现（非递归；docstring 注明 O(n)）"
+  ],
+  "constraints": ["仅 stdlib", "禁止网络调用", "禁止修改工作区外任何文件"],
+  "depends_on": [],
+  "lanes": [
+    {
+      "lane_id": "lane_dsh_pilot",
+      "owner_paths": ["coupling/dsh-pilot/fib.py", "coupling/dsh-pilot/test_fib.py"],
+      "depends_on": [],
+      "backend_preference": "dsh",
+      "acceptance_checks": ["uv run --group dev pytest coupling/dsh-pilot/test_fib.py -q 全绿"]
+    }
+  ],
+  "lane_review_parallel": false,
+  "verification": {
+    "command": "/home/gw/opt/agent-task-runner/.venv/bin/python -m pytest coupling/dsh-pilot/test_fib.py -q",
+    "expected_output": "1 passed",
+    "timeout_sec": 120
+  }
+}
