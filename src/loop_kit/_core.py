@@ -3089,9 +3089,10 @@ def _collect_streamed_process_output(
                     if line_callback is not None:
                         line_callback(raw_line)
             except (OSError, ValueError):
-                # PM #3346: main thread closed the pipe while we were blocked
-                # reading it (bounded reclaim of a grandchild-held pipe) —
-                # treat as EOF and exit quietly.
+                # PM #3346: defensive — if the pipe is ever closed underneath
+                # a blocked read (bounded reclaim abandons the reader, and any
+                # external close of the process's pipe raises here), treat it
+                # as EOF and exit quietly.
                 pass
         finally:
             _close_pipe(pipe)
