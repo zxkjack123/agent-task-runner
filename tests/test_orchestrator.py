@@ -270,6 +270,46 @@ def test_run_auto_dispatch_retry_exhaustion_terminates_despite_pipe_hold(tmp_pat
     assert elapsed < 20.0, f"retry exhaustion took {elapsed:.1f}s (pipe-hold blocked termination)"
 
 
+def test_parent_process_died_detects_reparented_ppid(monkeypatch) -> None:
+    # Direct predicate with a mocked getppid: reparented-to-1 => orphan.
+    real_getppid = orchestrator.os.getppid
+    try:
+        monkeypatch.setattr(orchestrator.os, "getppid", lambda: 1)
+        assert orchestrator._parent_process_died() is True
+        monkeypatch.setattr(orchestrator.os, "getppid", real_getppid)
+        assert orchestrator._parent_process_died() is False
+    finally:
+        monkeypatch.setattr(orchestrator.os, "getppid", real_getppid)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX reparenting semantics only")
+def test_parent_death_monitor_exits_real_child() -> None:
+    missing_artifact = repr(str(Path("/nonexistent-missing-artifact.json")))
+    script = (
+        "import sys, unittest.mock\n"
+        "from pathlib import Path\n"
+        f"sys.path.insert(0, {str(Path(__file__).resolve().parents[1] / 'src')!r})\n"
+        "from loop_kit import _core\n"
+        "with unittest.mock.patch('os.getppid', return_value=1):\n"
+        f"    _core._wait_for_file(Path({missing_artifact}), 't', timeout_sec=0)\n"
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-c", script],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+    )
+    try:
+        # PARENT_DEATH_POLL_SEC=5.0: first poll fires within ~5s of entering
+        # _wait_for_file; 30s bound gives ample margin.
+        rc = proc.wait(timeout=30)
+        assert rc == orchestrator.EXIT_PARENT_DEAD, f"expected exit {orchestrator.EXIT_PARENT_DEAD}, got {rc}"
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+
+
 class _FakeEvent:
     def __init__(self, *, initially_set: bool = False) -> None:
         self._is_set = initially_set

@@ -470,7 +470,12 @@ EXIT_LOCK_FAILURE = 5
 # ONLY at the single-round subprocess layer; the parent normalizes any
 # non-zero child rc through the existing EXIT_VALIDATION_ERROR (3) path.
 EXIT_PLAN_PATCH_VIOLATION = 6
+# PM #3346: parent process died (PPID reparented to init/systemd on POSIX)
+# while we were blocked in a long wait — child exits on its own instead of
+# lingering as an orphan (18.6h orphan incident of 2026-09-04).
+EXIT_PARENT_DEAD = 7
 EXIT_INTERRUPTED = 130
+PARENT_DEATH_POLL_SEC = 5.0
 PATTERN_STALE_DAYS = 30
 PATTERN_HIGH_CONFIDENCE = 0.7
 _KNOWLEDGE_MAX_PATTERNS = 200
@@ -3058,6 +3063,7 @@ def _collect_streamed_process_output(
     summary_callback: Callable[[str], None] | None = None,
     stdout_line_callback: Callable[[str], None] | None = None,
 ) -> tuple[str, str, int, bool]:
+    _ensure_parent_death_monitor()
     stdout_chunks: list[str] = []
     stderr_chunks: list[str] = []
     stdin_thread: threading.Thread | None = None
@@ -9775,6 +9781,40 @@ def _tests_summary(tests: object) -> dict:
 
 
 # ── polling ─────────────────────────────────────────────────────────
+# PM #3346 parent-death detection: a single-round child that blocks in a long
+# wait must not linger as an orphan after its parent dies. POSIX semantics:
+# when the parent exits, the child's PPID is reparented to 1 (init/systemd).
+# Windows has no equivalent signal — monitor is disabled there (os.name != "nt").
+_parent_death_monitor_started: bool = False
+_parent_death_monitor_lock = threading.Lock()
+
+
+def _parent_process_died() -> bool:
+    # POSIX: reparented-to-init is the reliable orphan signal.
+    return os.getppid() == 1
+
+
+def _ensure_parent_death_monitor() -> None:
+    global _parent_death_monitor_started
+    if os.name == "nt":
+        return
+    with _parent_death_monitor_lock:
+        if _parent_death_monitor_started:
+            return
+        _parent_death_monitor_started = True
+
+        def _monitor_loop() -> None:
+            while True:
+                time.sleep(PARENT_DEATH_POLL_SEC)
+                if _parent_process_died():
+                    _log("parent process died; exiting with EXIT_PARENT_DEAD")
+                    # os._exit: no state writes, no lock release — the parent is
+                    # gone and clean exit is preferred over wounded teardown.
+                    os._exit(EXIT_PARENT_DEAD)
+
+        threading.Thread(target=_monitor_loop, daemon=True, name="parent-death-monitor").start()
+
+
 def _wait_for_file(
     path: Path,
     description: str,
@@ -9787,6 +9827,7 @@ def _wait_for_file(
     show_manual_hint: bool = True,
 ) -> dict | None:
     """Poll until *path* appears. Returns parsed JSON or None on timeout."""
+    _ensure_parent_death_monitor()
     _log(f"Waiting for {path.name} ({description}) ...")
     if show_manual_hint:
         print(f"\n  >>> Tell the {'Worker' if 'work' in path.name else 'Reviewer'} to process their input file. <<<\n")
