@@ -298,15 +298,33 @@ def test_run_auto_dispatch_retry_exhaustion_terminates_despite_pipe_hold(tmp_pat
     assert elapsed < 20.0, f"retry exhaustion took {elapsed:.1f}s (pipe-hold blocked termination)"
 
 
-def test_parent_process_died_detects_reparented_ppid(monkeypatch) -> None:
-    # Direct predicate with a mocked getppid: reparented-to-1 => orphan.
+def test_parent_process_died_initial_ppid_semantics(monkeypatch) -> None:
+    # PM #3351: predicate is gated on the monitor's recorded initial PPID —
+    # monitor not started (None) or born-with-PPID=1 must never judge orphan;
+    # only a genuine reparenting transition (initial != 1, now == 1) triggers.
     real_getppid = orchestrator.os.getppid
     try:
+        # 1) Monitor never started: no baseline -> False regardless of getppid.
+        monkeypatch.setattr(orchestrator, "_parent_death_initial_ppid", None)
+        monkeypatch.setattr(orchestrator.os, "getppid", lambda: 1)
+        assert orchestrator._parent_process_died() is False
+
+        # 2) Born with PPID=1 (systemd/detached): never an orphan.
+        monkeypatch.setattr(orchestrator, "_parent_death_initial_ppid", 1)
+        monkeypatch.setattr(orchestrator.os, "getppid", lambda: 1)
+        assert orchestrator._parent_process_died() is False
+
+        # 3) Parent still alive: initial == current != 1 -> False.
+        monkeypatch.setattr(orchestrator, "_parent_death_initial_ppid", 4242)
+        monkeypatch.setattr(orchestrator.os, "getppid", lambda: 4242)
+        assert orchestrator._parent_process_died() is False
+
+        # 4) Reparenting transition: initial != 1, now == 1 -> True.
+        monkeypatch.setattr(orchestrator, "_parent_death_initial_ppid", 4242)
         monkeypatch.setattr(orchestrator.os, "getppid", lambda: 1)
         assert orchestrator._parent_process_died() is True
-        monkeypatch.setattr(orchestrator.os, "getppid", real_getppid)
-        assert orchestrator._parent_process_died() is False
     finally:
+        monkeypatch.setattr(orchestrator, "_parent_death_initial_ppid", None)
         monkeypatch.setattr(orchestrator.os, "getppid", real_getppid)
 
 
@@ -314,11 +332,16 @@ def test_parent_process_died_detects_reparented_ppid(monkeypatch) -> None:
 def test_parent_death_monitor_exits_real_child() -> None:
     missing_artifact = repr(str(Path("/nonexistent-missing-artifact.json")))
     script = (
-        "import sys, unittest.mock\n"
+        "import os, sys, unittest.mock\n"
         "from pathlib import Path\n"
         f"sys.path.insert(0, {str(Path(__file__).resolve().parents[1] / 'src')!r})\n"
         "from loop_kit import _core\n"
-        "with unittest.mock.patch('os.getppid', return_value=1):\n"
+        "real_ppid = os.getppid()\n"
+        "calls = {'n': 0}\n"
+        "def fake_getppid():\n"
+        "    calls['n'] += 1\n"
+        "    return real_ppid if calls['n'] == 1 else 1\n"
+        "with unittest.mock.patch('os.getppid', side_effect=fake_getppid):\n"
         f"    _core._wait_for_file(Path({missing_artifact}), 't', timeout_sec=0)\n"
     )
     proc = subprocess.Popen(
@@ -329,8 +352,9 @@ def test_parent_death_monitor_exits_real_child() -> None:
         encoding="utf-8",
     )
     try:
-        # PARENT_DEATH_POLL_SEC=5.0: first poll fires within ~5s of entering
-        # _wait_for_file; 30s bound gives ample margin.
+        # The monitor records real_ppid as baseline (first getppid call inside
+        # _ensure_parent_death_monitor); subsequent calls return 1, so the
+        # first poll (PARENT_DEATH_POLL_SEC=5.0) fires EXIT_PARENT_DEAD.
         rc = proc.wait(timeout=30)
         assert rc == orchestrator.EXIT_PARENT_DEAD, f"expected exit {orchestrator.EXIT_PARENT_DEAD}, got {rc}"
     finally:
