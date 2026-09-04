@@ -1,0 +1,10 @@
+# dsh ACP 冒烟 cordis patches（PM #2665 T3.1）
+# 通过 SDK patches 机制追加 subagent-acp 条目（SDK 0.1.2rc1 以 --patch 传入）。
+# providerName: acp, command: opencode, args: ["acp"], permission: reject。
+- id: subagent-acp
+  name: '@deepseek-ai/dsh-subagent-acp'
+  config:
+    providerName: acp
+    command: opencode
+    args: ["acp"]
+    permission: reject
