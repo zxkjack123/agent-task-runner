@@ -446,6 +446,12 @@ class _RoundOutcome(Enum):
 
 _TERMINAL_OUTCOME_VALUES = frozenset(member.value for member in _RoundOutcome)
 DISPATCH_STREAM_POLL_SEC = 0.1
+# PM #3346: bounded reclaim for pipe-reader threads. When a grandchild of the
+# dispatched process inherits the pipe write ends (opencode CLI spawning agent
+# descendants), EOF never arrives and the reader thread blocks forever inside
+# 'for raw_line in pipe'. After proc.wait() we join each reader with this cap
+# and abandon any still-blocked reader (daemon thread) instead of hanging.
+_PIPE_READER_JOIN_TIMEOUT_SEC = 2.0
 _WAIT_SAFETY_CAP_SEC = 86400  # 24h absolute cap in _wait_for_file
 _SESSION_ROLES = ("worker", "reviewer")
 _DISPATCH_PHASE_ROLE_CHOICES = ("all", "worker", "reviewer")
@@ -3070,10 +3076,16 @@ def _collect_streamed_process_output(
         if pipe is None:
             return
         try:
-            for raw_line in pipe:
-                sink.append(raw_line)
-                if line_callback is not None:
-                    line_callback(raw_line)
+            try:
+                for raw_line in pipe:
+                    sink.append(raw_line)
+                    if line_callback is not None:
+                        line_callback(raw_line)
+            except (OSError, ValueError):
+                # PM #3346: main thread closed the pipe while we were blocked
+                # reading it (bounded reclaim of a grandchild-held pipe) —
+                # treat as EOF and exit quietly.
+                pass
         finally:
             _close_pipe(pipe)
 
@@ -3121,8 +3133,27 @@ def _collect_streamed_process_output(
         time.sleep(DISPATCH_STREAM_POLL_SEC)
 
     returncode = proc.wait()
-    stdout_thread.join()
-    stderr_thread.join()
+
+    # PM #3346: bounded reclaim of pipe-reader threads. A grandchild holding
+    # the pipe write ends (opencode CLI spawning agent descendants) keeps the
+    # reader blocked in 'for raw_line in pipe' forever — unbounded join()
+    # would hang the main thread with no path to retry exhaustion.
+    # Note: we deliberately do NOT close the pipe from here — CPython io
+    # objects hold an internal lock while blocked in readline(), so close()
+    # from the main thread would itself block until the grandchild exits.
+    # The abandoned reader is a daemon thread: it finishes on its own when
+    # the grandchild eventually closes the write ends (EOF), or dies at
+    # process exit.
+    def _join_reader(thread: threading.Thread, stream_name: str) -> None:
+        thread.join(timeout=_PIPE_READER_JOIN_TIMEOUT_SEC)
+        if thread.is_alive():
+            _log(
+                f"abandoning blocked {stream_name} reader after "
+                f"{_PIPE_READER_JOIN_TIMEOUT_SEC:.1f}s; grandchild may hold the pipe"
+            )
+
+    _join_reader(stdout_thread, "stdout")
+    _join_reader(stderr_thread, "stderr")
     if stdin_thread is not None:
         stdin_thread.join(timeout=5.0)
     return "".join(stdout_chunks), "".join(stderr_chunks), returncode, timed_out

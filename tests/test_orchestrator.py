@@ -174,6 +174,102 @@ class _BlockingStdin:
         self._released.set()
 
 
+def _grandchild_pipe_holder_script(exit_code: int) -> str:
+    """Child spawns a grandchild that inherits the pipe write ends, then exits.
+
+    The grandchild holds the stdout/stderr pipes open (close_fds=False +
+    explicit fd pass-through) so the parent's reader threads never see EOF —
+    the same shape as the #3346 orphan (opencode CLI spawning agent
+    descendants that outlive the direct child).
+    """
+    return (
+        "import sys, subprocess\n"
+        "pidfile = sys.argv[1]\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(15)'],\n"
+        "    stdout=sys.stdout, stderr=sys.stderr, close_fds=False, start_new_session=True)\n"
+        "with open(pidfile, 'w', encoding='utf-8') as f:\n"
+        "    f.write(str(child.pid))\n"
+        f"sys.exit({exit_code})\n"
+    )
+
+
+def _kill_pidfile_process(pidfile: Path) -> None:
+    with contextlib.suppress(FileNotFoundError, ValueError):
+        pid = int(pidfile.read_text(encoding="utf-8"))
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
+
+
+def test_collect_streamed_process_output_returns_when_grandchild_holds_pipe(tmp_path: Path) -> None:
+    pidfile = tmp_path / "grandchild.pid"
+    proc = subprocess.Popen(
+        [sys.executable, "-c", _grandchild_pipe_holder_script(0), str(pidfile)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+    )
+    try:
+        start = time.monotonic()
+        stdout, stderr, returncode, timed_out = orchestrator._collect_streamed_process_output(
+            proc,
+            role="worker",
+            backend="codex",
+            parse_event_fn=orchestrator._require_registered_parse_event("codex"),
+            stdin_text=None,
+            timeout_sec=0,
+            verbose=False,
+        )
+        elapsed = time.monotonic() - start
+        # Grandchild holds the pipe for ~15s; a bounded collector must return
+        # well before that instead of blocking on the reader-thread join.
+        assert elapsed < 10.0, f"collector blocked {elapsed:.1f}s on grandchild-held pipe"
+        assert isinstance(stdout, str)
+        assert isinstance(stderr, str)
+        assert returncode == 0
+        assert timed_out is False
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=5)
+        _kill_pidfile_process(pidfile)
+
+
+def test_run_auto_dispatch_retry_exhaustion_terminates_despite_pipe_hold(tmp_path: Path, monkeypatch) -> None:
+    pidfile = tmp_path / "grandchild.pid"
+    monkeypatch.setattr(
+        orchestrator,
+        "_agent_command",
+        lambda backend, prompt: (
+            [sys.executable, "-c", _grandchild_pipe_holder_script(3), str(pidfile)],
+            None,
+            "STDIN_PAYLOAD",
+        ),
+    )
+    monkeypatch.setattr(orchestrator, "_log", lambda msg: None)
+    monkeypatch.setattr(orchestrator, "_write_dispatch_log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(orchestrator, "_feed_event", lambda *args, **kwargs: None)
+
+    start = time.monotonic()
+    try:
+        with pytest.raises(RuntimeError, match="after 2 attempts"):
+            orchestrator._run_auto_dispatch(
+                "worker",
+                "codex",
+                "ignored",
+                0,
+                dispatch_retries=1,
+                dispatch_retry_base_sec=1,
+            )
+    finally:
+        _kill_pidfile_process(pidfile)
+    elapsed = time.monotonic() - start
+    # Retry exhaustion must terminate via the RuntimeError path, not by
+    # blocking ~15s per attempt on grandchild-held pipes.
+    assert elapsed < 20.0, f"retry exhaustion took {elapsed:.1f}s (pipe-hold blocked termination)"
+
+
 class _FakeEvent:
     def __init__(self, *, initially_set: bool = False) -> None:
         self._is_set = initially_set
