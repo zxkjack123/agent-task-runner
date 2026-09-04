@@ -1154,6 +1154,54 @@ def test_run_auto_dispatch_retry_exhaustion_raises_final_failure(monkeypatch) ->
     assert fail_events[2]["retry_budget_remaining"] == 0
 
 
+def test_run_auto_dispatch_retry_exhaustion_zero_retries_raises(monkeypatch) -> None:
+    events: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(
+        orchestrator,
+        "_agent_command",
+        lambda backend, prompt: (["codex.exe", "exec", "short instruction"], None, "STDIN_PAYLOAD"),
+    )
+    monkeypatch.setattr(orchestrator, "_log", lambda msg: None)
+    monkeypatch.setattr(orchestrator, "_write_dispatch_log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        orchestrator,
+        "_feed_event",
+        lambda event, *, level="info", data=None: events.append((event, dict(data or {}))),
+    )
+
+    popen_calls: list[list[str]] = []
+    sleep_calls: list[int] = []
+
+    def fake_popen(cmd, **kwargs):
+        _ = kwargs
+        popen_calls.append(cmd)
+        return _FakeProc(stdout_lines=[], stderr_lines=["fail\n"], returncode=3)
+
+    monkeypatch.setattr(orchestrator.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(orchestrator.time, "sleep", lambda sec: sleep_calls.append(sec))
+
+    with pytest.raises(RuntimeError) as exc:
+        orchestrator._run_auto_dispatch(
+            "worker",
+            "codex",
+            "ignored",
+            30,
+            dispatch_retries=0,
+            dispatch_retry_base_sec=5,
+        )
+
+    # retries=0 -> max_attempts=1: single attempt, no retry sleep, terminal raise.
+    assert "after 1 attempts" in str(exc.value)
+    assert "(backend=codex, rc=3)" in str(exc.value)
+    assert len(popen_calls) == 1
+    assert sleep_calls == []
+    fail_events = [payload for event, payload in events if event == orchestrator.FEED_DISPATCH_FAIL]
+    assert len(fail_events) == 1
+    assert fail_events[0]["retry_budget_total"] == 1
+    assert fail_events[0]["retry_budget_consumed"] == 1
+    assert fail_events[0]["retry_budget_remaining"] == 0
+
+
 def test_run_auto_dispatch_permanent_error_fails_fast_without_retrying(monkeypatch) -> None:
     monkeypatch.setattr(
         orchestrator,
