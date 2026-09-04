@@ -73,10 +73,20 @@ def _m1_transcripts(transcript_dir: Path, expected_dispatches: int) -> tuple[str
             for f in sub.rglob("session.jsonl"):
                 if f.is_file():
                     session_files.append(f)
+            # SDK 0.1.2rc1 persists transcripts as session.jsonl.zstd by
+            # default (compression template drift, see T1.2 note). Count the
+            # file as present but skip per-line parsing (stdlib has no zstd).
+            for f in sub.rglob("session.jsonl.zstd"):
+                if f.is_file():
+                    session_files.append(f)
         elif sub.is_file() and sub.suffix in (".jsonl",):
             session_files.append(sub)
     stats["transcripts"] = len(session_files)
     for f in session_files:
+        if f.suffix == ".zstd":
+            stats.setdefault("compressed_transcripts", 0)
+            stats["compressed_transcripts"] += 1
+            continue
         entries = _load_jsonl(f)
         types: set[str] = set()
         seq_ok = True
