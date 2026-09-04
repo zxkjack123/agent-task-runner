@@ -9812,20 +9812,27 @@ def _tests_summary(tests: object) -> dict:
 # Windows has no equivalent signal — monitor is disabled there (os.name != "nt").
 _parent_death_monitor_started: bool = False
 _parent_death_monitor_lock = threading.Lock()
+# PM #3351: PPID observed when the monitor starts. A process born with PPID=1
+# (systemd services / daemons launched detached) must NOT be judged orphaned —
+# only a genuine reparenting transition (initial != 1, later == 1) triggers.
+_parent_death_initial_ppid: int | None = None
 
 
 def _parent_process_died() -> bool:
-    # POSIX: reparented-to-init is the reliable orphan signal.
+    if _parent_death_initial_ppid is None or _parent_death_initial_ppid == 1:
+        return False
+    # POSIX: reparented-to-init after the parent exited is the orphan signal.
     return os.getppid() == 1
 
 
 def _ensure_parent_death_monitor() -> None:
-    global _parent_death_monitor_started
+    global _parent_death_monitor_started, _parent_death_initial_ppid
     if os.name == "nt":
         return
     with _parent_death_monitor_lock:
         if _parent_death_monitor_started:
             return
+        _parent_death_initial_ppid = os.getppid()
         _parent_death_monitor_started = True
 
         def _monitor_loop() -> None:
