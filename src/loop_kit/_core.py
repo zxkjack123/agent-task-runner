@@ -452,6 +452,7 @@ DISPATCH_STREAM_POLL_SEC = 0.1
 # 'for raw_line in pipe'. After proc.wait() we join each reader with this cap
 # and abandon any still-blocked reader (daemon thread) instead of hanging.
 _PIPE_READER_JOIN_TIMEOUT_SEC = 2.0
+# PM #3346 plan D1: retained (not parameterized) — absolute fallback for manual-mode waits.
 _WAIT_SAFETY_CAP_SEC = 86400  # 24h absolute cap in _wait_for_file
 _SESSION_ROLES = ("worker", "reviewer")
 _DISPATCH_PHASE_ROLE_CHOICES = ("all", "worker", "reviewer")

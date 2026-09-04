@@ -310,6 +310,20 @@ def test_parent_death_monitor_exits_real_child() -> None:
             proc.kill()
 
 
+def test_wait_for_file_safety_cap_returns_none(tmp_path: Path, monkeypatch) -> None:
+    # PM #3346 plan D1: _WAIT_SAFETY_CAP_SEC (24h) is retained as the absolute
+    # fallback for manual-mode waits (timeout_sec=0). Lock the semantics so a
+    # future change cannot silently remove the cap.
+    monotonic_values = iter([0.0, 86401.0])
+    monkeypatch.setattr(orchestrator.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(orchestrator.time, "sleep", lambda _: None)
+    monkeypatch.setattr(orchestrator, "_log", lambda msg: None)
+
+    result = orchestrator._wait_for_file(tmp_path / "missing.json", "t", timeout_sec=0)
+
+    assert result is None
+
+
 class _FakeEvent:
     def __init__(self, *, initially_set: bool = False) -> None:
         self._is_set = initially_set
