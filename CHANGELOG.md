@@ -170,3 +170,9 @@
 - **Relative-date freshness samples**: hardcoded future-dated fresh sample (`"last_verified": "2026-04-01T12:00:00Z"`) — a time bomb that expired past the 30-day stale threshold — replaced with runtime-computed relative date (`now(UTC) - 5 days`). Also neutralized the analogous `"source_version": "2026-04-01"` latent hazard. Eliminates the `TestCmdStatus::test_shows_context_file_stats` time bomb with zero new dependencies.
 - **Suite-wide path-global isolation**: new `tests/conftest.py` adds a suite-level autouse fixture that snapshots/restores the 8 module globals mutated by 14 direct calls to production `orchestrator._configure_loop_paths()` (from `test_integration.py` and `test_pm_integration.py`), preventing test-order-dependent pollution from breaking `TestResetDefault::test_task_card_in_resettable_files`.
 - Result: full `pytest -m "not e2e"` → **614 passed, 1 skipped, 3 deselected, 0 failed** (4 consistent full runs); both previously-failing tests pass in isolation. Commit `768ffb1` (tests only).
+
+### Pilot (dsh backend T4, #2665)
+
+- dsh SDK backend 注册（registry 第 4 槽 in-process 派发，`--worker-backend dsh` 可选启用，默认 codex 不受影响）
+- 四指标试点结论：CONDITIONAL——loop_kit 侧接线完整可用；dsh SDK 运行时侧环境阻断（无 sandbox backend → 无 bash 执行通道），详见 docs/dsh-pilot-report.md
+- 已知限制：dsh 组合无 sandbox/guard/approval 插件；费率未登记（cost=0）；transcript 为 zstd 压缩格式
