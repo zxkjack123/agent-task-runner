@@ -1,57 +1,70 @@
 # Revision Disposition — ATR Consumer Contract
 
-> PM #3263 T3.2 — ATR-owned specification; copilot-agents is **OUT-OF-SCOPE**.
+> PM #3263 T3.2 — ATR-owned specification. The **producer** (upstream that
+> writes `mode` / `plan_patch` into the task card) is explicitly
+> OUT-OF-SCOPE for this repository.
 
-## Purpose
+## ① 背景定位 (Background)
 
-Define the ATR-side contract for session revision disposition: the structured
-signal that a **task-executor** session can emit to declare whether its plan
-patch was applied, rejected, or partially applied — and what the downstream
-(ATR loop driver / PM coordinator / acceptance reviewer) should do with it.
+ATR (`loop_kit`) is the **consumer** of a revision-disposition signal: the
+task card carries `mode` and, for patch-mode tasks, a `plan_patch` contract.
+ATR validates, renders, and post-verifies that contract; it does **not**
+author the disposition schema on behalf of the upstream producer.
 
-## Contract Location
+As of 2026-09-03, the `copilot-agents` repository contains **no**
+`revision_disposition` symbol (grep 0 hits) — any conclusion of the form
+"the interface should be implemented upstream" must be recorded here and
+never implemented in this repo.
 
-ATR-side only. The concept `revision_disposition` does **not** exist in the
-copilot-agents repository (grep 0 hits as of 2026-09-03). The ATR loop is the
-**producer** of this signal; the copilot-agents `pm-task-closed-loop` skill is
-the **consumer** in the T1/T2 pipeline. The schema is defined here so that
-both sides can evolve independently.
+## ② mode 枚举语义表 (Mode Enum Semantics)
 
-## Schema
+| mode | 语义 | ATR 行为 |
+|------|------|----------|
+| `generate` | 缺省：常规生成任务 | 全功能 worker→reviewer 流程；无 plan_patch 契约 |
+| `patch` | 按计划打补丁 | 强制 `plan_patch` 契约；动态渲染契约段；worker 完成后 `_verify_plan_patch_scope` 后置硬闸（fail-closed，违例 exit 6 子进程层 / 父进程归一 exit 3，零重试） |
+| `revise` | 修订已有产物 | 与 generate 同路径；预留差异语义 |
+| `rebuild` | 重建 | 与 generate 同路径；预留差异语义 |
+
+非法值在 `_validate_task_card_contract` 层拒绝（`ConfigError`），零行为漂移。
+`_TASK_MODES` 常量（T2.1 定义）与本表及 T3.2 实现点三处一致，变更须三处同步。
+
+## ③ plan_patch 键 schema (Plan Patch Contract Schema)
 
 ```yaml
-revision_disposition:
-  verdict: applied | rejected | partial
-  applied_commit: "<sha>"         # mandatory when verdict=applied
-  blocked_anchors: [<anchor>]     # mandatory when verdict=partial
-  skip_reason: "<text>"           # mandatory when verdict=rejected
-  plan_patch_verified: true|false # whether the T2.3 hard gate passed
+plan_patch:            # 仅 mode=patch 时允许出现；缺失 + mode=patch → fail-closed
+  allowed_files:       # [Required] repo-relative 路径列表（含计划文件自身）
+    - ".github/plans/xxx.md"
+  allowed_anchors:     # [NotRequired] 计划文件内锚点白名单
+    - {file: ".github/plans/xxx.md", line: 120}      # 单行
+    - {file: ".github/plans/xxx.md", heading: "Phase 2"}  # 标题节（首现位置起，±200 行窗口）
+  forbid_new_files: true   # [默认 true] 禁止新建白名单外文件
 ```
 
-## Integration Points
+约束：`allowed_files` 非空且每项为字符串；`allowed_anchors` 每项 `file` 必填
+且 `line`/`heading` 恰好其一；结构违例 → `ConfigError`（fail-closed，宁拒勿放）。
 
-| Layer | Mechanism | Status |
-|-------|-----------|--------|
-| ATR `_run_single_round` | `_verify_plan_patch_scope` (T2.3) produces `plan_patch_verified` | ✅ implemented |
-| ATR `_run_multi_round_via_subprocess` | Reads child exit code; appends `plan_patch_review` info event | ✅ implemented |
-| PM #3263 summary | Optional `budget` block includes `task_mode` | ✅ implemented in RunConfig |
-| copilot-agents | **No** `revision_disposition` symbol exists | ⚠️ OUT-OF-SCOPE |
+## ④ 消费点 (Consumption Points)
 
-## Why ATR-Owned
+| 层 | 机制 | 状态 |
+|----|------|------|
+| 契约校验 | `_validate_task_card_contract`（T2.1） | ✅ 已实现 |
+| prompt 渲染 | `_render_task_card_section` 动态注入契约段（仅 patch 模式；静态模板零改动） | ✅ 已实现 |
+| 后置硬闸 | `_verify_plan_patch_scope`（T2.3；事实源 `base_sha..head_sha`） | ✅ 已实现 |
+| 事件观测 | feed `task_mode` / `plan_patch_verify` / `plan_patch_violation` / `timeout_class` | ✅ 已实现（T3.1） |
+| summary 落盘 | `summary.json` 可选 `budget` 块（含 `task_mode`，仅启用时写入） | ✅ 已实现（T3.1） |
+| 退出码分层 | `EXIT_PLAN_PATCH_VIOLATION=6` 仅子进程层；父进程归一 exit 3 | ✅ 已实现 |
 
-- The copilot-agents repository is the **dev-repo** for agent definitions,
-  skills, and instructions; it does not contain ATR runtime code.
-- `revision_disposition` is a runtime contract between the ATR executor and
-  the PM closed-loop pipeline. Defining it here keeps the ATR loop as the
-  single source of truth for execution semantics.
-- If copilot-agents adopts this concept in the future, this document serves
-  as the canonical reference.
+## ⑤ 生产者最小实现建议 (Producer Guidance — INFORMATIONAL ONLY)
 
-## Design Notes
+上游（PM 闭环/计划编排侧）若需要 `revision_disposition` 语义，建议最小实现
+仅为：写 task card 时提供 `mode`（四值之一）与 `plan_patch`（patch 模式
+必填）。ATR 不依赖任何其他上游字段；此处建议不构成对 copilot-agents
+或其他仓库的实现要求。
 
-- `verdict=partial` is the most common outcome for plan-patch tasks that hit
-  heading-anchor or file-scope constraints.
-- `plan_patch_verified` is the authoritative field; the textual verdict is
-  derived from it.
-- The `skip_reason` field is human-readable and intended for PM/acceptance
-  triage, not for automated routing.
+## ⑥ 维护声明 (Maintenance Statement)
+
+- 本契约由 T2.1（校验实现）、T3.2（本文件）共同维护。
+- `mode` 枚举变更必须同步：`_TASK_MODES`（T2.1）、本文件 §②、测试锁定。
+- `budget` 块字段变更必须同步：D3 定义、T3.1 实现、`TestSummaryBudgetBlock`。
+- copilot-agents 当前无 `revision_disposition` 符号——若未来引入，以本文件为
+  规范性参考，但实现归属上层仓库。

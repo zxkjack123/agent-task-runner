@@ -16408,3 +16408,109 @@ class TestHistoricalReplayT3151T3152:
             f"clean tree must pass the dirty check (not 4) and the repo lock (not 5); "
             f"got {proc.returncode}. stderr: {stderr[-500:]}"
         )
+
+
+class TestSummaryBudgetBlock:
+    """PM #3263 T3.1: summary budget block + task_mode feed plumbing."""
+
+    def _make_config(self, **overrides):
+        defaults = dict(
+            session_timeout_sec=0,
+            context_token_budget=0,
+            context_token_warn_pct=80,
+            worker_backend="native",
+        )
+        defaults.update(overrides)
+        return orchestrator.RunConfig(**defaults)
+
+    def test_budget_block_written_when_enabled(self, monkeypatch) -> None:
+        cfg = self._make_config(session_timeout_sec=3600, context_token_budget=10000)
+        now = time.time()
+        deadline = now + 120.0
+        state = {"session_deadline_at": deadline, "started_at": str(now - 60.0)}
+        work: orchestrator.WorkReport = {
+            "task_id": "T-BB1",
+            "head_sha": "h",
+            "round": 1,
+            "files_changed": [],
+            "notes": "",
+            "tests": [],
+            "input_tokens": 500,
+            "total_tokens": 700,
+        }
+        block = orchestrator._summary_budget_block(config=cfg, state=state, work=work, task_mode="patch")
+        assert block is not None
+        assert block["session_timeout_sec"] == 3600
+        assert block["session_elapsed_sec"] is not None
+        assert block["session_timed_out"] is False
+        assert block["context_budget"] == 10000
+        assert "context_budget_exceeded" in block
+        assert block["task_mode"] == "patch"
+        assert isinstance(block["timeout_counts"], dict)
+
+    def test_no_budget_block_when_defaults(self, monkeypatch) -> None:
+        cfg = self._make_config()
+        state: dict = {}
+        block = orchestrator._summary_budget_block(config=cfg, state=state, work=None, task_mode="generate")
+        assert block is None
+
+    def test_summary_writes_budget_only_when_provided(self, monkeypatch, tmp_path) -> None:
+        _configure_loop_paths(monkeypatch, tmp_path)
+        orchestrator._write_round_summary(
+            task_id="T-BB2",
+            run_id="r",
+            outcome="approved",
+            round_num=1,
+            base_sha="b",
+            head_sha="h",
+            files_changed=[],
+            review_non_blocking=[],
+            round_details=[],
+        )
+        first = json.loads((tmp_path / ".loop" / "summary.json").read_text(encoding="utf-8"))
+        assert "budget" not in first
+        orchestrator._write_round_summary(
+            task_id="T-BB2",
+            run_id="r",
+            outcome="approved",
+            round_num=1,
+            base_sha="b",
+            head_sha="h",
+            files_changed=[],
+            review_non_blocking=[],
+            round_details=[],
+            budget={"task_mode": "patch", "session_timeout_sec": 3600},
+        )
+        second = json.loads((tmp_path / ".loop" / "summary.json").read_text(encoding="utf-8"))
+        assert second["budget"]["task_mode"] == "patch"
+
+    def test_task_mode_feed_passthrough(self, monkeypatch, tmp_path) -> None:
+        _configure_loop_paths(monkeypatch, tmp_path)
+        events: list[tuple[str, str, dict]] = []
+        monkeypatch.setattr(
+            orchestrator,
+            "_feed_event",
+            lambda event, level="info", data=None, paths=None: events.append((event, level, dict(data or {}))),
+        )
+        completed = orchestrator._completed_proc(["x"], 0, "", "")
+        orchestrator._report_dispatch_result(
+            role="worker",
+            backend="native",
+            cmd=["x"],
+            result=completed,
+            attempt=1,
+            max_attempts=1,
+            task_id="T-BB3",
+            task_mode="patch",
+            paths=None,
+        )
+        dispatch_events = [d for e, _lvl, d in events if e == orchestrator.FEED_DISPATCH_COMPLETE]
+        assert dispatch_events, "expected a dispatch_complete feed event"
+        assert dispatch_events[0]["task_mode"] == "patch"
+        assert dispatch_events[0]["mode"] == orchestrator.DISPATCH_BACKEND_NATIVE
+
+    def test_task_mode_default_generate(self) -> None:
+        assert orchestrator._task_mode_from_card({}) == "generate"
+        assert orchestrator._task_mode_from_card(None) == "generate"
+        assert orchestrator._task_mode_from_card({"mode": "patch"}) == "patch"
+        assert orchestrator._task_mode_from_card({"mode": "  revise  "}) == "revise"

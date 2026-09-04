@@ -1091,6 +1091,76 @@ def _archive_task_summary(task_id: str, paths: LoopPaths | None = None) -> Path 
     return dest
 
 
+def _task_mode_from_card(task_card: object) -> str:
+    """PM #3263 D6: card `mode` is authoritative; missing key defaults to
+    ``generate`` (value validity is enforced upstream by
+    ``_validate_task_card_contract``)."""
+    if isinstance(task_card, dict):
+        raw_mode = task_card.get("mode")
+        if isinstance(raw_mode, str) and raw_mode.strip():
+            return raw_mode.strip()
+    return "generate"
+
+
+def _summary_budget_block(
+    *,
+    config: RunConfig,
+    state: dict,
+    work: WorkReport | None,
+    task_mode: str,
+    timeout_counts: dict[str, int] | None = None,
+    permanent_failures: int = 0,
+    retries_total: int = 0,
+) -> dict[str, object] | None:
+    """PM #3263 T3.1: observation-only summary budget block (D3 fields).
+
+    Returns ``None`` when every budget is disabled *and* the task card
+    carries no explicit mode, preserving the legacy summary contract.
+    Otherwise returns the D3 field set; single-round subprocesses report
+    round-local token observations (the parent loop holds the cumulative
+    ledger).
+    """
+    session_timeout_sec = int(config.session_timeout_sec or 0)
+    context_budget = int(config.context_token_budget or 0)
+    if session_timeout_sec <= 0 and context_budget <= 0 and task_mode == "generate":
+        return None
+    deadline_at = _session_deadline_from_state(state)
+    session_fields = _session_budget_fields(
+        deadline_at=deadline_at,
+        budget_sec=float(session_timeout_sec),
+    )
+    observed_input: int | None = None
+    observed_total: int | None = None
+    if isinstance(work, dict):
+        runtime_fields = _runtime_cost_and_token_fields(cast(dict[str, object], work), backend=config.worker_backend)
+        observed_input = runtime_fields.get("input_tokens")
+        observed_total = runtime_fields.get("total_tokens")
+    context_report: dict[str, object] = {}
+    if context_budget > 0:
+        context_report = _context_budget_report(
+            observed_input=observed_input,
+            observed_total=observed_total,
+            prompt_chars=None,
+            budget=context_budget,
+            warn_pct=config.context_token_warn_pct,
+        )
+    block: dict[str, object] = {
+        "session_timeout_sec": session_timeout_sec,
+        "session_elapsed_sec": session_fields.get("session_elapsed_sec"),
+        "session_timed_out": bool(session_fields.get("session_timed_out")),
+        "context_budget": context_budget,
+        "context_budget_exceeded": bool(context_report.get("context_budget_exceeded", False)),
+        "timeout_counts": dict(timeout_counts or {}),
+        "permanent_failures": permanent_failures,
+        "retries_total": retries_total,
+        "task_mode": task_mode,
+    }
+    if context_report:
+        block["context_input_tokens_observed"] = context_report.get("context_input_tokens_observed")
+        block["context_total_tokens_observed"] = context_report.get("context_total_tokens_observed")
+    return block
+
+
 def _write_round_summary(
     *,
     task_id: str,
@@ -1109,6 +1179,7 @@ def _write_round_summary(
     worker_notes: str = "",
     duration_ms: int = 0,
     knowledge_updates: KnowledgeUpdates | None = None,
+    budget: dict[str, object] | None = None,
 ) -> None:
     resolved_paths = _resolve_paths(paths)
     resolved_paths.summary.parent.mkdir(parents=True, exist_ok=True)
@@ -1134,6 +1205,10 @@ def _write_round_summary(
         payload["duration_ms"] = duration_ms
     if knowledge_updates:
         payload["knowledge_updates"] = knowledge_updates
+    # PM #3263 T3.1: optional budget block — written only when explicitly
+    # provided by the caller (default None keeps the legacy summary contract).
+    if budget is not None:
+        payload["budget"] = budget
     resolved_paths.summary.write_text(
         json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
@@ -2923,6 +2998,7 @@ def _report_dispatch_result(
     task_id: str | None = None,
     round_num: int | None = None,
     lane_id: str | None = None,
+    task_mode: str | None = None,
     paths: LoopPaths | None = None,
 ) -> None:
     _write_dispatch_log(role, cmd, result, session_id, paths=paths)
@@ -2953,6 +3029,10 @@ def _report_dispatch_result(
         data["stdout_len"] = stdout_len
     if interrupted:
         data["interrupted"] = True
+    # PM #3263 T3.1: task_mode observability — lives alongside the existing
+    # mode=DISPATCH_BACKEND_NATIVE key (dispatch mode), distinct semantics.
+    if task_mode is not None:
+        data["task_mode"] = task_mode
     _feed_event(
         event_type,
         level=("info" if timeout_sec is None and result.returncode == 0 else "error"),
@@ -3247,6 +3327,7 @@ def _run_auto_dispatch(
     session_deadline_at: float | None = None,
     telemetry: dict[str, object] | None = None,
     cwd: Path | None = None,
+    task_mode: str | None = None,
     paths: LoopPaths | None = None,
 ) -> str | None:
     parse_event_fn = _require_registered_parse_event(backend)
@@ -3505,6 +3586,7 @@ def _run_auto_dispatch(
                     task_id=task_id,
                     round_num=round_num,
                     lane_id=lane_id,
+                    task_mode=task_mode,
                     paths=paths,
                 )
                 raise
@@ -3546,6 +3628,7 @@ def _run_auto_dispatch(
                     task_id=task_id,
                     round_num=round_num,
                     lane_id=lane_id,
+                    task_mode=task_mode,
                     paths=paths,
                 )
                 raise DispatchTimeoutError(
@@ -3585,6 +3668,7 @@ def _run_auto_dispatch(
                 task_id=task_id,
                 round_num=round_num,
                 lane_id=lane_id,
+                task_mode=task_mode,
                 paths=paths,
             )
 
@@ -11342,6 +11426,7 @@ def _auto_dispatch_role(
     run_id: str | None = None,
     state: dict | None = None,
     lane_id: str | None = None,
+    task_mode: str | None = None,
     paths: LoopPaths | None = None,
 ) -> dict | None:
     if not config.auto_dispatch:
@@ -11405,6 +11490,7 @@ def _auto_dispatch_role(
             dispatch_started_at=dispatch_started_at,
             session_deadline_at=_session_deadline_from_state(current_state),
             telemetry=dispatch_metrics,
+            task_mode=task_mode,
             paths=paths,
         )
 
@@ -11735,6 +11821,10 @@ def _run_single_round(
     lane_cleanup_ids: list[str] = []
     lane_cleanup_done = False
     preserve_lane_worktrees = _lane_preserve_worktrees_on_failure(task_card)
+    # PM #3263 T3.1: task-mode observability. Card `mode` is authoritative;
+    # missing key defaults to "generate" (validated upstream by
+    # _validate_task_card_contract, so the value here is always a legal mode).
+    task_mode = _task_mode_from_card(task_card)
 
     def _cleanup_lane_worktrees() -> None:
         nonlocal lane_cleanup_done
@@ -11993,6 +12083,7 @@ def _run_single_round(
                     session_deadline_at=session_deadline_at,
                     telemetry=dispatch_metrics,
                     cwd=handle.path,
+                    task_mode=task_mode,
                     paths=resolved_paths,
                 )
 
@@ -12177,6 +12268,7 @@ def _run_single_round(
                     session_deadline_at=session_deadline_at,
                     telemetry=dispatch_metrics,
                     cwd=lane_handle.path,
+                    task_mode=task_mode,
                     paths=resolved_paths,
                 )
 
@@ -12552,6 +12644,7 @@ def _run_single_round(
                 artifact_path=resolved_paths.work_report,
                 run_id=run_id,
                 state=state,
+                task_mode=task_mode,
                 paths=resolved_paths,
             )
         except RuntimeError as e:
@@ -12789,6 +12882,7 @@ def _run_single_round(
             artifact_path=resolved_paths.review_report,
             run_id=run_id,
             state=state,
+            task_mode=task_mode,
             paths=resolved_paths,
         )
     except RuntimeError as e:
@@ -13974,6 +14068,16 @@ def _single_round_handle_review_approved(
     )
     _write_task_card_status(config.task_path, TASK_STATUS_DONE, paths=resolved_paths)
     knowledge = _extract_knowledge_from_round(work, review)
+    # PM #3263 T3.1: budget block is observation-only and written only when
+    # budgets are enabled or the card carries an explicit mode.
+    terminal_card = _load_task_card(str(resolved_paths.task_card))
+    terminal_task_mode = _task_mode_from_card(terminal_card)
+    terminal_budget = _summary_budget_block(
+        config=config,
+        state=state,
+        work=work,
+        task_mode=terminal_task_mode,
+    )
     print(f"\n{'=' * 60}")
     print(f"  APPROVED at round {round_num}")
     print(f"  base: {base_sha[:8]}  head: {head_sha[:8]}")
@@ -13992,6 +14096,7 @@ def _single_round_handle_review_approved(
         worker_notes=str(work.get("notes", "")),
         duration_ms=int(work.get("duration_ms", 0)),
         knowledge_updates=knowledge,
+        budget=terminal_budget,
         paths=resolved_paths,
     )
     _archive_task_summary(task_id, paths=resolved_paths)
