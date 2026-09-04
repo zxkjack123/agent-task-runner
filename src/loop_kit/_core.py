@@ -3174,37 +3174,60 @@ def _collect_streamed_text_output(
 ) -> tuple[str, str, int]:
     stdout_chunks: list[str] = []
     stderr_chunks: list[str] = []
+    # PM #3351: reader exceptions are stashed here instead of swallowed so the
+    # legacy propagation contract (callback errors raised after a bounded
+    # proc.wait(timeout=1)) is preserved — see tests:837.
+    stream_error: list[BaseException] = []
 
-    def _read_stderr() -> None:
-        if proc.stderr is None:
+    def _read_pipe(pipe, sink: list[str], line_callback=None) -> None:
+        if pipe is None:
             return
         try:
-            for raw_line in proc.stderr:
-                stderr_chunks.append(raw_line)
+            for raw_line in pipe:
+                sink.append(raw_line)
+                if line_callback is not None:
+                    line_callback(raw_line)
+        except Exception as exc:
+            stream_error.append(exc)
         finally:
-            _close_pipe(proc.stderr)
+            _close_pipe(pipe)
 
-    stderr_thread = threading.Thread(target=_read_stderr, daemon=True)
+    stdout_thread = threading.Thread(
+        target=_read_pipe,
+        args=(proc.stdout, stdout_chunks, stdout_line_callback),
+        daemon=True,
+    )
+    stderr_thread = threading.Thread(
+        target=_read_pipe,
+        args=(proc.stderr, stderr_chunks, None),
+        daemon=True,
+    )
+    stdout_thread.start()
     stderr_thread.start()
 
-    if proc.stdout is not None:
-        stream_error = False
-        try:
-            for raw_line in proc.stdout:
-                stdout_chunks.append(raw_line)
-                if stdout_line_callback is not None:
-                    stdout_line_callback(raw_line)
-        except Exception:
-            stream_error = True
-            raise
-        finally:
-            _close_pipe(proc.stdout)
-            if stream_error:
-                with contextlib.suppress(subprocess.TimeoutExpired, OSError):
-                    proc.wait(timeout=1)
+    # PM #3351: bounded reclaim of pipe-reader threads (mirrors
+    # _collect_streamed_process_output, #3346). A grandchild holding the pipe
+    # write ends keeps a reader blocked forever; unbounded join() would hang
+    # the main thread. We do NOT close the pipe from here — CPython io objects
+    # hold an internal lock while blocked in readline(), so close() from the
+    # main thread would itself block until the grandchild exits. The abandoned
+    # reader is a daemon thread and exits on its own at EOF or process exit.
+    def _join_reader(thread: threading.Thread, stream_name: str) -> None:
+        thread.join(timeout=_PIPE_READER_JOIN_TIMEOUT_SEC)
+        if thread.is_alive():
+            _log(
+                f"abandoning blocked {stream_name} reader after "
+                f"{_PIPE_READER_JOIN_TIMEOUT_SEC:.1f}s; grandchild may hold the pipe"
+            )
+
+    _join_reader(stdout_thread, "stdout")
+    _join_reader(stderr_thread, "stderr")
+    if stream_error:
+        with contextlib.suppress(subprocess.TimeoutExpired, OSError):
+            proc.wait(timeout=1)
+        raise stream_error[0]
 
     returncode = proc.wait()
-    stderr_thread.join()
     return "".join(stdout_chunks), "".join(stderr_chunks), returncode
 
 
