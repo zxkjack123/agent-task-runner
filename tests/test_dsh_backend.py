@@ -65,8 +65,11 @@ def _reset_fake_harness_instances() -> None:
 def _install_fake_module(monkeypatch: pytest.MonkeyPatch, result: FakeRunResult) -> None:
     module = types.ModuleType("deepseek_harness")
     module.DeepSeekHarness = lambda **kwargs: FakeHarness(result, **kwargs)  # type: ignore[attr-defined]
-    module.HarnessError = FakeHarnessError  # type: ignore[attr-defined]
+    errors_module = types.ModuleType("deepseek_harness.errors")
+    errors_module.HarnessError = FakeHarnessError  # type: ignore[attr-defined]
+    module.errors = errors_module  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "deepseek_harness", module)
+    monkeypatch.setitem(sys.modules, "deepseek_harness.errors", errors_module)
 
 
 def _ok_result() -> FakeRunResult:
@@ -102,7 +105,6 @@ def test_dsh_run_fn_returns_stdout_and_session_id(monkeypatch: pytest.MonkeyPatc
         summary_callback=summaries.append,
         actual_cwd=Path("/tmp"),
     )
-
 
     assert _stdout == "OK"
     assert _stderr == ""
@@ -154,8 +156,10 @@ def test_dsh_run_fn_passes_resume_session_id(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_dsh_run_fn_import_error_fails_loud(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Simulate SDK not installed: drop the module from sys.modules.
-    monkeypatch.delitem(sys.modules, "deepseek_harness", raising=False)
+    # Simulate SDK not installed even though it IS in this venv: a None entry
+    # in sys.modules makes import raise ImportError (Python semantics).
+    monkeypatch.setitem(sys.modules, "deepseek_harness", None)
+    monkeypatch.setitem(sys.modules, "deepseek_harness.errors", None)
     monkeypatch.setattr(orchestrator, "_log", lambda msg: None)
 
     _stdout, _stderr, returncode, timed_out, session_id = orchestrator._run_dsh_sdk_dispatch(
@@ -175,13 +179,16 @@ def test_dsh_run_fn_import_error_fails_loud(monkeypatch: pytest.MonkeyPatch) -> 
 
 def test_dsh_run_fn_harness_error_returns_rc1(monkeypatch: pytest.MonkeyPatch) -> None:
     module = types.ModuleType("deepseek_harness")
-    module.HarnessError = FakeHarnessError  # type: ignore[attr-defined]
+    errors_module = types.ModuleType("deepseek_harness.errors")
+    errors_module.HarnessError = FakeHarnessError  # type: ignore[attr-defined]
+    module.errors = errors_module  # type: ignore[attr-defined]
 
     def _raising_harness(**kwargs: Any) -> FakeHarness:
         raise FakeHarnessError("boom")
 
     module.DeepSeekHarness = _raising_harness  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "deepseek_harness", module)
+    monkeypatch.setitem(sys.modules, "deepseek_harness.errors", errors_module)
     monkeypatch.setattr(orchestrator, "_log", lambda msg: None)
 
     _stdout, _stderr, returncode, timed_out, _session_id = orchestrator._run_dsh_sdk_dispatch(

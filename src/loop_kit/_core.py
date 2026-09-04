@@ -2908,7 +2908,8 @@ def _run_dsh_sdk_dispatch(
     root is injected via the DSH_SESSION_ROOT env var (no session_root param).
     """
     try:
-        from deepseek_harness import DeepSeekHarness, HarnessError
+        from deepseek_harness import DeepSeekHarness
+        from deepseek_harness.errors import HarnessError
     except ImportError:
         return (
             "",
