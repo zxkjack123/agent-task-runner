@@ -418,6 +418,7 @@ _DEFAULT_FEED_TASK_ROUTE_POLICY = FEED_TASK_ROUTE_POLICY_TAG
 BACKEND_CODEX = "codex"
 BACKEND_CLAUDE = "claude"
 BACKEND_OPENCODE = "opencode"
+BACKEND_DSH = "dsh"
 _SERIAL_LANE_ID = "__serial__"
 # Estimated pricing table in cents per 1M tokens. These values provide deterministic
 # cost telemetry for runtime comparisons, not billing-grade accounting.
@@ -2470,7 +2471,12 @@ def _stream_dispatch_stdout_line(
 BackendBuildFn = Callable[..., tuple[list[str], str | None, str | None]]
 BackendResolveFn = Callable[[str], str]
 BackendParseEventFn = Callable[[str, str, str], str | None]
-_BACKEND_REGISTRY: dict[str, tuple[BackendBuildFn, BackendResolveFn, BackendParseEventFn]] = {}
+# PM #2665: optional in-process dispatch hook (4th registry slot). Defaults to
+# None for the three subprocess backends; dsh uses it for SDK-based dispatch.
+# Signature: (prompt, *, role, timeout_sec, resume_session_id, summary_callback,
+# actual_cwd) -> (stdout_text, stderr_text, returncode, timed_out, session_id).
+BackendRunFn = Callable[..., tuple[str, str, int, bool, str | None]]
+_BACKEND_REGISTRY: dict[str, tuple[BackendBuildFn, BackendResolveFn, BackendParseEventFn, BackendRunFn | None]] = {}
 
 
 def _available_backends() -> list[str]:
@@ -2482,16 +2488,17 @@ def register_backend(
     build_cmd_fn: BackendBuildFn,
     resolve_exe_fn: BackendResolveFn,
     parse_event_fn: BackendParseEventFn,
+    run_fn: BackendRunFn | None = None,
 ) -> None:
     backend = name.strip().lower()
     if not backend:
         raise ValueError("backend name must not be empty")
-    _BACKEND_REGISTRY[backend] = (build_cmd_fn, resolve_exe_fn, parse_event_fn)
+    _BACKEND_REGISTRY[backend] = (build_cmd_fn, resolve_exe_fn, parse_event_fn, run_fn)
 
 
 def _require_registered_backend(
     backend: str,
-) -> tuple[BackendBuildFn, BackendResolveFn, BackendParseEventFn]:
+) -> tuple[BackendBuildFn, BackendResolveFn, BackendParseEventFn, BackendRunFn | None]:
     key = backend.strip().lower()
     spec = _BACKEND_REGISTRY.get(key)
     if spec is None:
@@ -2681,7 +2688,7 @@ def _build_claude_command(
 
 
 def _resolve_backend_exe(backend: str) -> str:
-    _, resolve_exe_fn, _ = _require_registered_backend(backend)
+    _, resolve_exe_fn, _, _ = _require_registered_backend(backend)
     return resolve_exe_fn(backend.strip().lower())
 
 
@@ -2695,7 +2702,7 @@ def _agent_command(
     For codex >= 0.118.0 the prompt context is piped via stdin so the
     command line stays short.  The short CLI arg is a one-line instruction.
     """
-    build_cmd_fn, _, _ = _require_registered_backend(backend)
+    build_cmd_fn, _, _, _ = _require_registered_backend(backend)
     exe = _resolve_backend_exe(backend)
     backend_key = backend.strip().lower()
     sid = SessionManager.normalize_session_id(resume_session_id)
@@ -2740,7 +2747,7 @@ def _git_is_ancestor(
 
 
 def _require_registered_parse_event(backend: str) -> BackendParseEventFn:
-    _, _, parse_event_fn = _require_registered_backend(backend)
+    _, _, parse_event_fn, _ = _require_registered_backend(backend)
     return parse_event_fn
 
 
@@ -2821,9 +2828,176 @@ def _opencode_parse_event(role: str, backend: str, line: str) -> str | None:
     return None
 
 
+# ── dsh backend (PM #2665) ────────────────────────────────────────────
+# The dsh CLI headless runner is NOT installed in the pilot environment
+# (probe T0.1, docs/dsh-pilot-probe.md). The functions below document the
+# CLI fallback shape for future enablement; the pilot dispatches exclusively
+# through the SDK path (_run_dsh_sdk_dispatch, registered as the 4th slot
+# run_fn).
+
+
+def _build_dsh_command(
+    exe: str,
+    prompt: str,
+    resume_session_id: str | None = None,
+) -> tuple[list[str], str | None, str | None]:
+    # Documented fallback only — NOT called in this pilot (dsh CLI not
+    # installed). The prompt travels as a positional argument and is subject
+    # to OS ARG_MAX; a >100KB prompt must fail-fast before this point.
+    sid = SessionManager.normalize_session_id(resume_session_id)
+    cmd = [exe, "--profile", "headless", prompt]
+    return (cmd, sid or None, None)
+
+
+def _resolve_dsh_exe(backend: str) -> str:
+    return _resolve_exe_from_candidates(
+        backend=backend,
+        candidates=[shutil.which(BACKEND_DSH)],
+    )
+
+
+def _dsh_parse_event(role: str, backend: str, line: str) -> str | None:
+    _ = backend
+    text = line.strip()
+    if not text:
+        return None
+    return f"[{role}] Message: {_truncate_summary_text(text)}"
+
+
+def _dsh_event_summary(role: str, event: object) -> str | None:
+    """Map one SDK RunResult event to a stream summary; None = skip."""
+    if not isinstance(event, dict):
+        return None
+    event_type = event.get("type")
+    if event_type == "assistant/message":
+        data = event.get("data") or {}
+        message = data.get("message") if isinstance(data, dict) else None
+        content = message.get("content") if isinstance(message, dict) else None
+        parts: list[str] = []
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and isinstance(block.get("text"), str):
+                    parts.append(block["text"])
+        text = "".join(parts).strip()
+        return f"[{role}] Message: {_truncate_summary_text(text)}" if text else None
+    if event_type == "turn/end":
+        data = event.get("data") or {}
+        reason = data.get("reason") if isinstance(data, dict) else None
+        kind = reason.get("kind") if isinstance(reason, dict) else None
+        return f"[{role}] Turn ended: {kind}" if isinstance(kind, str) else f"[{role}] Turn ended"
+    if event_type == "agent/inbox/spliced":
+        return None
+    # Unknown type: generic branch, never fabricate tool event names.
+    return f"[{role}] Event: {event_type}"
+
+
+def _run_dsh_sdk_dispatch(
+    prompt: str,
+    *,
+    role: str,
+    timeout_sec: int,
+    resume_session_id: str | None,
+    summary_callback: Callable[[str], None] | None,
+    actual_cwd: Path,
+) -> tuple[str, str, int, bool, str | None]:
+    """In-process dsh dispatch via the DeepSeek Harness Python SDK.
+
+    Lazy import keeps CI green without the SDK installed (D3); a missing SDK
+    fails loud with returncode 1. Adapted to SDK 0.1.2rc1 API: config is a
+    DeepSeekHarnessConfig dataclass, dsh_home is mandatory, and the session
+    root is injected via the DSH_SESSION_ROOT env var (no session_root param).
+    """
+    try:
+        from deepseek_harness import DeepSeekHarness, HarnessError
+    except ImportError:
+        return (
+            "",
+            "deepseek-harness-sdk not installed; run: uv pip install deepseek-harness-sdk",
+            1,
+            False,
+            None,
+        )
+
+    provider = os.environ.get("LOOP_DSH_PROVIDER", "deepseek-official")
+    model = os.environ.get("LOOP_DSH_MODEL", "deepseek-v4-flash")
+    try:
+        max_tokens = int(os.environ.get("LOOP_DSH_MAX_TOKENS", "49152"))
+    except ValueError:
+        max_tokens = 49152
+    session_root = (ROOT / ".loop" / "dsh-sessions").resolve()
+    dsh_home = (ROOT / ".loop" / "dsh-home").resolve()
+    session_root.mkdir(parents=True, exist_ok=True)
+    dsh_home.mkdir(parents=True, exist_ok=True)
+    normalized_sid = SessionManager.normalize_session_id(resume_session_id)
+
+    harness: DeepSeekHarness | None = None
+    result_holder: dict[str, object] = {}
+
+    def _run_in_worker() -> None:
+        try:
+            h = DeepSeekHarness(
+                provider=provider,
+                model=model,
+                max_tokens=max_tokens,
+                cwd=str(actual_cwd),
+                dsh_home=str(dsh_home),
+                env={"DSH_SESSION_ROOT": str(session_root)},
+            )
+            result_holder["harness"] = h
+            result_holder["result"] = h.run(prompt, session_id=normalized_sid)
+        except BaseException as exc:
+            result_holder["error"] = exc
+
+    worker = threading.Thread(target=_run_in_worker, daemon=True, name="dsh-sdk-dispatch")
+    worker.start()
+    # Wall-clock guard: join with the caller timeout; on timeout close the
+    # harness (terminates the runtime subprocess, unblocking h.run via
+    # TransportClosedError) and report timed_out. request_timeout_seconds is
+    # deliberately not set — its semantics cover a single inner request while
+    # the wall-clock guard mirrors the subprocess dispatch timeout contract.
+    worker.join(timeout=timeout_sec if timeout_sec > 0 else None)
+    harness = result_holder.get("harness")  # type: ignore[assignment]
+    if worker.is_alive():
+        if harness is not None:
+            with contextlib.suppress(Exception):
+                harness.close()
+        worker.join(timeout=5.0)
+        return ("", f"dsh dispatch timeout after {timeout_sec}s", -9, True, normalized_sid)
+
+    error = result_holder.get("error")
+    if error is not None:
+        if harness is not None:
+            with contextlib.suppress(Exception):
+                harness.close()
+        exc = error if isinstance(error, BaseException) else RuntimeError(str(error))
+        if isinstance(exc, HarnessError):
+            return ("", f"dsh HarnessError: {type(exc).__name__}: {exc}", 1, False, normalized_sid)
+        return ("", f"dsh-sdk error: {type(exc).__name__}: {exc}", 1, False, normalized_sid)
+
+    try:
+        result = result_holder["result"]
+    except KeyError:
+        return ("", "dsh-sdk error: run() returned no result", 1, False, normalized_sid)
+    finally:
+        if harness is not None:
+            with contextlib.suppress(Exception):
+                harness.close()
+
+    session_id = result.session_id
+    stdout_text = result.final_response or ""
+    finish_reason = result.finish_reason
+    returncode = 0 if finish_reason == "completed" else 1
+    for event in result.events:
+        summary = _dsh_event_summary(role, event)
+        if summary is not None and summary_callback is not None:
+            summary_callback(summary)
+    return stdout_text, "", returncode, False, session_id
+
+
 register_backend(BACKEND_CODEX, _build_codex_command, _resolve_codex_exe, _codex_event_summary)
 register_backend(BACKEND_CLAUDE, _build_claude_command, _resolve_claude_exe, _claude_parse_event)
 register_backend(BACKEND_OPENCODE, _build_opencode_command, _resolve_opencode_exe, _opencode_parse_event)
+register_backend(BACKEND_DSH, _build_dsh_command, _resolve_dsh_exe, _dsh_parse_event, run_fn=_run_dsh_sdk_dispatch)
 
 
 def _write_dispatch_log(
@@ -3562,96 +3736,133 @@ def _run_auto_dispatch(
                     data=payload,
                 )
 
-            if active_resume_session_id is None:
-                cmd, cmd_sid, stdin_text = _agent_command(backend, prompt)
-            else:
-                cmd, cmd_sid, stdin_text = _agent_command(
-                    backend,
-                    prompt,
-                    resume_session_id=active_resume_session_id,
-                )
-            if cwd is not None and backend.strip().lower() == BACKEND_CODEX:
-                cmd = _codex_command_with_repo_root(cmd, repo_root=cwd)
-            if dispatch_anchor_perf is None:
-                dispatch_anchor_perf = time.perf_counter()
-            _feed_event(
-                FEED_DISPATCH_START,
-                data=_feed_data(
-                    task_id=task_id,
-                    round_num=round_num,
-                    role=role,
-                    lane_id=lane_id,
-                    mode=DISPATCH_BACKEND_NATIVE,
-                    backend=backend,
-                    attempt=attempt,
-                    max_attempts=max_attempts,
-                    timeout_sec=timeout_sec,
-                    resume_requested=active_resume_session_id is not None,
-                    prompt_chars=len(prompt),
-                    **attempt_budget_before,
-                ),
-            )
-            proc_env = os.environ.copy()
-            actual_cwd = Path(cwd) if cwd is not None else ROOT
-            git_file = actual_cwd / ".git"
-            if git_file.is_file() and not git_file.is_dir():
-                try:
-                    gitdir_raw = git_file.read_text(encoding="utf-8").strip()
-                    if gitdir_raw.startswith("gitdir: "):
-                        gitdir = gitdir_raw[len("gitdir: ") :]
-                        proc_env["GIT_DIR"] = gitdir
-                        proc_env["GIT_WORK_TREE"] = str(actual_cwd)
-                except OSError:
-                    pass
-            proc = subprocess.Popen(
-                cmd,
-                cwd=str(actual_cwd),
-                env=proc_env,
-                stdin=(subprocess.PIPE if stdin_text is not None else None),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-            )
-            try:
-                stdout, stderr, returncode, timed_out = _collect_streamed_process_output(
-                    proc,
-                    role=role,
-                    backend=backend,
-                    parse_event_fn=parse_event_fn,
-                    stdin_text=stdin_text,
-                    timeout_sec=timeout_sec,
-                    verbose=verbose,
-                    summary_callback=_on_summary,
-                    stdout_line_callback=_on_stdout_line,
-                )
-            except KeyboardInterrupt:
-                _terminate_subprocess_on_interrupt(
-                    proc,
-                    context=f"auto-dispatch role={role} backend={backend} attempt={attempt}",
-                )
-                _report_dispatch_result(
-                    role=role,
-                    backend=backend,
-                    cmd=cmd,
-                    result=_completed_proc(
-                        cmd,
-                        proc.returncode,
-                        "",
-                        "",
-                        default_returncode=130,
+            run_fn = _require_registered_backend(backend)[3]
+            if run_fn is not None:
+                # PM #2665: in-process dispatch (dsh SDK). Bypasses
+                # _agent_command/Popen/_collect_streamed_process_output and
+                # reuses the shared result handling below. cmd is synthetic —
+                # _report_dispatch_result only consumes it for the log line.
+                cmd = ["<dsh>", "run"]
+                if dispatch_anchor_perf is None:
+                    dispatch_anchor_perf = time.perf_counter()
+                _feed_event(
+                    FEED_DISPATCH_START,
+                    data=_feed_data(
+                        task_id=task_id,
+                        round_num=round_num,
+                        role=role,
+                        lane_id=lane_id,
+                        mode=DISPATCH_BACKEND_NATIVE,
+                        backend=backend,
+                        attempt=attempt,
+                        max_attempts=max_attempts,
+                        timeout_sec=timeout_sec,
+                        resume_requested=active_resume_session_id is not None,
+                        prompt_chars=len(prompt),
+                        **attempt_budget_before,
                     ),
-                    attempt=attempt,
-                    max_attempts=max_attempts,
-                    session_id=cmd_sid,
-                    interrupted=True,
-                    task_id=task_id,
-                    round_num=round_num,
-                    lane_id=lane_id,
-                    task_mode=task_mode,
-                    paths=paths,
                 )
-                raise
+                actual_cwd = Path(cwd) if cwd is not None else ROOT
+                stdout, stderr, returncode, timed_out, dsh_sid = run_fn(
+                    prompt,
+                    role=role,
+                    timeout_sec=timeout_sec,
+                    resume_session_id=active_resume_session_id,
+                    summary_callback=_on_summary,
+                    actual_cwd=actual_cwd,
+                )
+                cmd_sid = dsh_sid or active_resume_session_id
+            else:
+                if active_resume_session_id is None:
+                    cmd, cmd_sid, stdin_text = _agent_command(backend, prompt)
+                else:
+                    cmd, cmd_sid, stdin_text = _agent_command(
+                        backend,
+                        prompt,
+                        resume_session_id=active_resume_session_id,
+                    )
+                if cwd is not None and backend.strip().lower() == BACKEND_CODEX:
+                    cmd = _codex_command_with_repo_root(cmd, repo_root=cwd)
+                if dispatch_anchor_perf is None:
+                    dispatch_anchor_perf = time.perf_counter()
+                _feed_event(
+                    FEED_DISPATCH_START,
+                    data=_feed_data(
+                        task_id=task_id,
+                        round_num=round_num,
+                        role=role,
+                        lane_id=lane_id,
+                        mode=DISPATCH_BACKEND_NATIVE,
+                        backend=backend,
+                        attempt=attempt,
+                        max_attempts=max_attempts,
+                        timeout_sec=timeout_sec,
+                        resume_requested=active_resume_session_id is not None,
+                        prompt_chars=len(prompt),
+                        **attempt_budget_before,
+                    ),
+                )
+                proc_env = os.environ.copy()
+                actual_cwd = Path(cwd) if cwd is not None else ROOT
+                git_file = actual_cwd / ".git"
+                if git_file.is_file() and not git_file.is_dir():
+                    try:
+                        gitdir_raw = git_file.read_text(encoding="utf-8").strip()
+                        if gitdir_raw.startswith("gitdir: "):
+                            gitdir = gitdir_raw[len("gitdir: ") :]
+                            proc_env["GIT_DIR"] = gitdir
+                            proc_env["GIT_WORK_TREE"] = str(actual_cwd)
+                    except OSError:
+                        pass
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=str(actual_cwd),
+                    env=proc_env,
+                    stdin=(subprocess.PIPE if stdin_text is not None else None),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                )
+                try:
+                    stdout, stderr, returncode, timed_out = _collect_streamed_process_output(
+                        proc,
+                        role=role,
+                        backend=backend,
+                        parse_event_fn=parse_event_fn,
+                        stdin_text=stdin_text,
+                        timeout_sec=timeout_sec,
+                        verbose=verbose,
+                        summary_callback=_on_summary,
+                        stdout_line_callback=_on_stdout_line,
+                    )
+                except KeyboardInterrupt:
+                    _terminate_subprocess_on_interrupt(
+                        proc,
+                        context=f"auto-dispatch role={role} backend={backend} attempt={attempt}",
+                    )
+                    _report_dispatch_result(
+                        role=role,
+                        backend=backend,
+                        cmd=cmd,
+                        result=_completed_proc(
+                            cmd,
+                            proc.returncode,
+                            "",
+                            "",
+                            default_returncode=130,
+                        ),
+                        attempt=attempt,
+                        max_attempts=max_attempts,
+                        session_id=cmd_sid,
+                        interrupted=True,
+                        task_id=task_id,
+                        round_num=round_num,
+                        lane_id=lane_id,
+                        task_mode=task_mode,
+                        paths=paths,
+                    )
+                    raise
             if first_meaningful_summary_ms is None:
                 _feed_event(
                     FEED_DISPATCH_FIRST_ACTION,
