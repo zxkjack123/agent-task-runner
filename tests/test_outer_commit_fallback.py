@@ -312,3 +312,132 @@ def test_lane_fallback_callsite_contract(monkeypatch: pytest.MonkeyPatch) -> Non
     assert captured["task_id"] == "t7"
     assert captured["round_num"] == 3
     assert captured["lane_id"] == "lane_x"
+
+
+# ── serial wrapper (PM #3369 T4.1) ────────────────────────────────────────
+
+
+def _serial_work() -> dict:
+    return {"head_sha": "base", "files_changed": ["coupling/fib.py"]}
+
+
+def _serial_card() -> dict:
+    return {"in_scope": ["coupling/fib.py"]}
+
+
+def test_serial_fallback_positive_backfills_work_and_rewrites_report(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        orchestrator,
+        "_try_outer_commit_fallback",
+        lambda **kwargs: "newsha1",
+    )
+    monkeypatch.setattr(orchestrator, "_log", lambda msg: None)
+    work = _serial_work()
+    paths = orchestrator._configure_loop_paths(tmp_path / ".loop")
+    report = paths.work_report
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text("{}", encoding="utf-8")
+
+    result = orchestrator._serial_outer_commit_fallback(
+        work, _serial_card(), base_sha="base", task_id="t", round_num=1, paths=paths
+    )
+    assert result == "newsha1"
+    assert work["head_sha"] == "newsha1"
+    import json
+
+    assert json.loads(report.read_text(encoding="utf-8"))["head_sha"] == "newsha1"
+
+
+def test_serial_fallback_skips_when_head_differs_from_base(monkeypatch: pytest.MonkeyPatch) -> None:
+    called: list[bool] = []
+
+    def _core(**kwargs: Any) -> str:
+        called.append(True)
+        return "sha"
+
+    monkeypatch.setattr(orchestrator, "_try_outer_commit_fallback", _core)
+    work = {"head_sha": "advanced", "files_changed": ["coupling/fib.py"]}
+    result = orchestrator._serial_outer_commit_fallback(
+        work, _serial_card(), base_sha="base", task_id="t", round_num=1
+    )
+    assert result is None
+    assert called == []
+
+
+def test_serial_fallback_env_zero_disabled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("LOOP_OUTER_COMMIT_FALLBACK", "0")
+    monkeypatch.setattr(orchestrator, "_log", lambda msg: None)
+    monkeypatch.setattr(
+        orchestrator, "_is_git_repo_root", lambda path: True
+    )
+    git_calls: list[list[str]] = []
+
+    def _fake_git(cwd: Path, *args: str, timeout: float | None = None) -> str:
+        git_calls.append(list(args))
+        if list(args) == ["status", "--porcelain"]:
+            return "?? coupling/fib.py\n"
+        raise AssertionError(f"unexpected git call: {args}")
+
+    monkeypatch.setattr(orchestrator, "_git_at", _fake_git)
+    work = _serial_work()
+    paths = orchestrator._configure_loop_paths(tmp_path / ".loop")
+    report = paths.work_report
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text("{}", encoding="utf-8")
+
+    result = orchestrator._serial_outer_commit_fallback(
+        work, _serial_card(), base_sha="base", task_id="t", round_num=1, paths=paths
+    )
+    assert result is None
+    # No git call at all — env valve short-circuits before any git invocation.
+    assert git_calls == []
+
+
+def test_serial_fallback_no_whitelist_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(orchestrator, "_log", lambda msg: None)
+    result = orchestrator._serial_outer_commit_fallback(
+        _serial_work(), {}, base_sha="base", task_id="t", round_num=1
+    )
+    assert result is None
+
+
+def test_serial_fallback_does_not_acquire_repo_lock(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    sentinel: list[str] = []
+    monkeypatch.setattr(
+        orchestrator,
+        "_acquire_repo_lock",
+        lambda **kwargs: sentinel.append("called") or None,
+    )
+    monkeypatch.setattr(orchestrator, "_log", lambda msg: None)
+    monkeypatch.setattr(orchestrator, "_is_git_repo_root", lambda path: True)
+
+    def _fake_git(cwd: Path, *args: str, timeout: float | None = None) -> str:
+        argv = list(args)
+        if argv == ["status", "--porcelain"]:
+            return "?? coupling/fib.py\n"
+        if argv[0] == "add":
+            return ""
+        if argv[0] == "commit":
+            return ""
+        if argv == ["rev-parse", "HEAD"]:
+            return "newsha2\n"
+        raise AssertionError(f"unexpected git call: {argv}")
+
+    monkeypatch.setattr(orchestrator, "_git_at", _fake_git)
+    work = _serial_work()
+    paths = orchestrator._configure_loop_paths(tmp_path / ".loop")
+    report = paths.work_report
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text("{}", encoding="utf-8")
+
+    result = orchestrator._serial_outer_commit_fallback(
+        work, _serial_card(), base_sha="base", task_id="t", round_num=1, paths=paths
+    )
+    assert result == "newsha2"
+    assert sentinel == []

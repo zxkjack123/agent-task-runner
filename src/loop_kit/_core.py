@@ -7687,6 +7687,42 @@ def _try_outer_commit_fallback(
         return None
 
 
+def _serial_outer_commit_fallback(
+    work: dict,
+    task_card: TaskCard,
+    *,
+    base_sha: str,
+    task_id: str,
+    round_num: int,
+    paths: LoopPaths | None = None,
+) -> str | None:
+    """Serial-mode outer-commit fallback wrapper (PM #3369).
+
+    Runs on ROOT (the single shared worktree). Returns the new head sha on
+    success (work["head_sha"] backfilled and the report rewritten), else None.
+    """
+    if str(work.get("head_sha", "")).strip() != base_sha:
+        return None
+    whitelist = _serial_outer_commit_whitelist(task_card)
+    declared = work.get("files_changed")
+    files_changed = cast(list[str], declared) if isinstance(declared, list) else []
+    new_head = _try_outer_commit_fallback(
+        worktree=ROOT,
+        whitelist=whitelist,
+        files_changed=files_changed,
+        task_id=task_id,
+        round_num=round_num,
+        lane_id=str(work.get("lane_id") or _SERIAL_LANE_ID),
+        paths=paths,
+    )
+    if new_head is None:
+        return None
+    work["head_sha"] = new_head
+    if paths is not None:
+        _atomic_write_json(paths.work_report, work)
+    return new_head
+
+
 def _lane_outer_commit_fallback(
     lane_work: dict,
     lane: TaskLane,
@@ -13286,6 +13322,23 @@ def _run_single_round(
             return
         work["head_sha"] = head_sha
         _atomic_write_json(resolved_paths.work_report, work)
+    # PM #3369: serial-mode outer-commit fallback (path A). A sandboxed worker
+    # (dsh) may write files and run tests but be unable to git-commit. The
+    # unsandboxed orchestrator commits the declared in-scope dirt on ROOT here,
+    # strictly before the no-change gate — so a successful fallback lands in
+    # the normal diff → reviewer flow instead of #2911 evidence gating.
+    if head_sha == base_sha and not lane_dispatch_enabled:
+        fallback_head = _serial_outer_commit_fallback(
+            work,
+            task_card,
+            base_sha=base_sha,
+            task_id=task_id,
+            round_num=round_num,
+            paths=resolved_paths,
+        )
+        if fallback_head is not None:
+            _log(f"Serial worker: outer commit fallback committed changes -> {fallback_head[:8]}")
+            head_sha = fallback_head
     if head_sha == base_sha:
         _noop_handler = _dispatch_single_round_phase("worker", "no_change_success")
         if _noop_handler is not None:
