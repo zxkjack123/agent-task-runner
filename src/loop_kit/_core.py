@@ -2869,6 +2869,53 @@ def _dsh_parse_event(role: str, backend: str, line: str) -> str | None:
     return f"[{role}] Message: {_truncate_summary_text(text)}"
 
 
+def _extract_dsh_usage_payload(events: object) -> dict[str, object]:
+    """Extract token usage from dsh SDK RunResult.events (PM #3371).
+
+    The SDK's RunResult carries no usage field; usage chunks arrive embedded
+    in assistant/chunk events: data.chunk.type == "usage" with camelCase keys
+    in data.chunk.usage. Pick the chunk with the largest totalTokens
+    (cumulative-monotonic snapshot semantics — deterministic for both
+    cumulative-snapshot and per-delta streaming); map the three keys to snake
+    case. cacheReadTokens / reasoningTokens are intentionally dropped.
+    """
+    if not isinstance(events, list):
+        return {}
+    best: dict[str, object] | None = None
+    best_total: int = -1
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        data = event.get("data")
+        if not isinstance(data, dict):
+            continue
+        chunk = data.get("chunk")
+        if not isinstance(chunk, dict):
+            continue
+        if chunk.get("type") != "usage":
+            continue
+        usage = chunk.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        total = _coerce_non_negative_int(usage.get("totalTokens"))
+        total_key = total if total is not None else -1
+        if best is None or total_key >= best_total:
+            best = usage
+            best_total = total_key
+    if best is None:
+        return {}
+    payload: dict[str, object] = {}
+    for camel, snake in (
+        ("inputTokens", "input_tokens"),
+        ("outputTokens", "output_tokens"),
+        ("totalTokens", "total_tokens"),
+    ):
+        value = _coerce_non_negative_int(best.get(camel))
+        if value is not None:
+            payload[snake] = value
+    return payload
+
+
 def _dsh_event_summary(role: str, event: object) -> str | None:
     """Map one SDK RunResult event to a stream summary; None = skip."""
     if not isinstance(event, dict):

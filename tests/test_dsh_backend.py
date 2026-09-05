@@ -240,3 +240,49 @@ def test_dsh_parse_event_cli_shape() -> None:
     summary = orchestrator._dsh_parse_event("worker", "dsh", "final answer text\n")
     assert summary is not None and "final answer text" in summary
     assert orchestrator._dsh_parse_event("worker", "dsh", "   \n") is None
+
+
+# ── usage payload extraction (PM #3371 T1.1) ─────────────────────────────
+
+
+def test_extract_dsh_usage_payload_real_shape() -> None:
+    events = [
+        {
+            "type": "assistant/chunk",
+            "data": {
+                "chunk": {
+                    "type": "usage",
+                    "usage": {
+                        "inputTokens": 189,
+                        "outputTokens": 149,
+                        "totalTokens": 8146,
+                        "cacheReadTokens": 7808,
+                        "reasoningTokens": 67,
+                    },
+                }
+            },
+        }
+    ]
+    payload = orchestrator._extract_dsh_usage_payload(events)
+    assert payload == {"input_tokens": 189, "output_tokens": 149, "total_tokens": 8146}
+
+
+def test_extract_dsh_usage_payload_empty() -> None:
+    assert orchestrator._extract_dsh_usage_payload([]) == {}
+    assert orchestrator._extract_dsh_usage_payload(None) == {}
+    assert orchestrator._extract_dsh_usage_payload([{"type": "assistant/message"}]) == {}
+    assert orchestrator._extract_dsh_usage_payload(
+        [{"type": "assistant/chunk", "data": {"chunk": {"type": "text"}}}]
+    ) == {}
+
+
+def test_extract_dsh_usage_payload_multi_chunk_max_total() -> None:
+    def chunk(total: int | None, i: int, o: int) -> dict:
+        usage: dict[str, object] = {"inputTokens": i, "outputTokens": o}
+        if total is not None:
+            usage["totalTokens"] = total
+        return {"type": "assistant/chunk", "data": {"chunk": {"type": "usage", "usage": usage}}}
+
+    events = [chunk(100, 1, 2), chunk(500, 50, 60), chunk(None, 7, 8)]
+    payload = orchestrator._extract_dsh_usage_payload(events)
+    assert payload == {"input_tokens": 50, "output_tokens": 60, "total_tokens": 500}
