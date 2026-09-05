@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: RUF001, RUF002  (Chinese docstrings use fullwidth punctuation intentionally)
 """dsh 试点四指标评测脚本（PM #2665 T2.2，纯 stdlib）。
 
 从试点运行产物计算四指标：
@@ -62,6 +63,53 @@ def _load_jsonl(path: Path) -> list[dict]:
     return entries
 
 
+def _load_zstd_jsonl(path: Path) -> list[dict]:
+    """Decompress a session.jsonl.zstd via optional zstandard or system zstd CLI.
+
+    Returns [] when neither is available (caller falls back to count-only).
+    """
+    raw: bytes | None = None
+    try:
+        import zstandard  # type: ignore[import-not-found]
+
+        dctx = zstandard.ZstdDecompressor()
+        raw = dctx.decompress(path.read_bytes())
+    except ImportError:
+        import shutil
+        import subprocess
+
+        zstd_bin = shutil.which("zstd")
+        if zstd_bin is None:
+            return []
+        try:
+            proc = subprocess.run(
+                [zstd_bin, "-dc", str(path)],
+                capture_output=True,
+                timeout=30,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            return []
+        if proc.returncode != 0:
+            return []
+        raw = proc.stdout
+    except Exception:
+        return []
+    if not raw:
+        return []
+    entries: list[dict] = []
+    for line in raw.decode("utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            entries.append(parsed)
+    return entries
+
+
 def _m1_transcripts(transcript_dir: Path, expected_dispatches: int) -> tuple[str, dict]:
     """Return (verdict, stats) for M1."""
     stats: dict = {"expected": expected_dispatches, "transcripts": 0, "event_types": {}, "replayable": 0}
@@ -74,8 +122,8 @@ def _m1_transcripts(transcript_dir: Path, expected_dispatches: int) -> tuple[str
                 if f.is_file():
                     session_files.append(f)
             # SDK 0.1.2rc1 persists transcripts as session.jsonl.zstd by
-            # default (compression template drift, see T1.2 note). Count the
-            # file as present but skip per-line parsing (stdlib has no zstd).
+            # default (compression template drift, see T1.2 note). Parse them
+            # via optional zstandard / system zstd CLI when available.
             for f in sub.rglob("session.jsonl.zstd"):
                 if f.is_file():
                     session_files.append(f)
@@ -84,10 +132,13 @@ def _m1_transcripts(transcript_dir: Path, expected_dispatches: int) -> tuple[str
     stats["transcripts"] = len(session_files)
     for f in session_files:
         if f.suffix == ".zstd":
-            stats.setdefault("compressed_transcripts", 0)
-            stats["compressed_transcripts"] += 1
-            continue
-        entries = _load_jsonl(f)
+            entries = _load_zstd_jsonl(f)
+            if not entries:
+                stats.setdefault("compressed_unparsed", 0)
+                stats["compressed_unparsed"] += 1
+                continue
+        else:
+            entries = _load_jsonl(f)
         types: set[str] = set()
         seq_ok = True
         last_seq: int | None = None
@@ -242,6 +293,40 @@ def _self_test() -> bool:
             encoding="utf-8",
         )
         _check("self-test-vi-pass", _m4_cost(tdir / "events.jsonl", 1)[0], "PASS")
+
+    # (vii) zstd transcript parse → M1 PASS with typed events (when a zstd
+    # decompressor is available); without one the case degrades to
+    # CONDITIONAL (count-only) — both acceptable, assert monotonic behaviour.
+    with tempfile.TemporaryDirectory() as tmp:
+        tdir = Path(tmp)
+        sess_dir = tdir / "cwd" / "sess-1"
+        sess_dir.mkdir(parents=True)
+        raw = (
+            "\n".join(
+                json.dumps({"type": t, "seq": i})
+                for i, t in enumerate(["session", "assistant/message", "turn/end"], start=1)
+            )
+            + "\n"
+        )
+        import shutil as _shutil
+        import subprocess as _sp
+
+        zstd_bin = _shutil.which("zstd")
+        if zstd_bin is not None:
+            proc = _sp.run(
+                [zstd_bin, "-c"],
+                input=raw.encode("utf-8"),
+                capture_output=True,
+                timeout=30,
+            )
+            if proc.returncode == 0:
+                (sess_dir / "session.jsonl.zstd").write_bytes(proc.stdout)
+                verdict, stats = _m1_transcripts(tdir, 1)
+                if _load_zstd_jsonl(sess_dir / "session.jsonl.zstd"):
+                    _check("self-test-vii", verdict, "PASS")
+                    assert stats["event_types"].get("assistant/message") == 1
+                else:
+                    _check("self-test-vii-degraded", verdict, "CONDITIONAL")
 
     print(f"SELF-TEST OK ({len(cases)} cases)")
     return True
