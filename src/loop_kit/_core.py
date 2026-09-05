@@ -7533,6 +7533,160 @@ def _task_lane_ids(task_card: TaskCard) -> list[str]:
     return lane_ids
 
 
+def _serial_outer_commit_whitelist(task_card: TaskCard) -> list[str]:
+    """Serial-mode owner whitelist for the outer-commit fallback (PM #3369).
+
+    Prefers the union of per-lane owner_paths (literal paths, enforced by
+    _OWNER_PATH_GLOB_CHARS at task-card validation). Falls back to in_scope
+    entries that are literal paths — glob-style entries (e.g. ``src/loop_kit/**``)
+    are filtered out because _owner_paths_overlap only matches literal prefixes,
+    and silently never-triggering on glob entries would hide the fallback gap
+    (CT caution #3369-1).
+    """
+    lanes = task_card.get("lanes")
+    if isinstance(lanes, list) and lanes:
+        whitelist: list[str] = []
+        for lane in lanes:
+            if not isinstance(lane, dict):
+                continue
+            owner_paths = lane.get("owner_paths")
+            if isinstance(owner_paths, list):
+                for p in owner_paths:
+                    if isinstance(p, str) and p:
+                        whitelist.append(p)
+        return whitelist
+    in_scope = task_card.get("in_scope")
+    if not isinstance(in_scope, list):
+        return []
+    return [p for p in in_scope if isinstance(p, str) and p and not any(c in _OWNER_PATH_GLOB_CHARS for c in p)]
+
+
+def _outer_commit_fallback_enabled() -> bool:
+    """PM #3369 D3: env escape valve, default on. Popen inherits env → the
+    parent's setting propagates into single-round subprocesses automatically."""
+    return os.environ.get("LOOP_OUTER_COMMIT_FALLBACK", "1").strip() != "0"
+
+
+def _normalize_declared_path(p: str) -> str:
+    """Normalize a worker-declared path to the same form _parse_porcelain_path
+    yields (CT caution #3369-2: strict string equality otherwise silently
+    never-triggers on ``./`` prefixes, trailing slashes, backslashes)."""
+    text = p.strip()
+    if text.endswith("/"):
+        text = text.rstrip("/")
+    if text.startswith("./"):
+        text = text[2:]
+    return text.replace("\\", "/")
+
+
+def _worktree_dirty_split(worktree: Path, whitelist: list[str]) -> tuple[list[str], list[str]]:
+    """Split a worktree's porcelain status into (in_scope, out_of_scope_tracked).
+
+    Untracked out-of-scope files are silently ignored (legacy tolerance);
+    tracked out-of-scope dirt is reported (overreach blocker). A single
+    `git -C <worktree> status --porcelain` call.
+    """
+    wl = sorted({_normalize_declared_path(w) for w in whitelist if w and w.strip()})
+    in_scope: list[str] = []
+    out_tracked: list[str] = []
+    status = _git_at(worktree, "status", "--porcelain")
+    for raw in status.splitlines():
+        if len(raw) < 3:
+            continue
+        xy = raw[:2]
+        path = _parse_porcelain_path(raw[3:])
+        if not path or path.startswith(".loop/"):
+            continue
+        if any(_owner_paths_overlap(path, w) for w in wl):
+            in_scope.append(path)
+        elif xy != "??":
+            out_tracked.append(path)
+    return sorted(set(in_scope)), sorted(set(out_tracked))
+
+
+def _try_outer_commit_fallback(
+    *,
+    worktree: Path,
+    whitelist: list[str],
+    files_changed: list[str],
+    task_id: str,
+    round_num: int,
+    lane_id: str,
+    paths: LoopPaths | None = None,
+) -> str | None:
+    """Outer commit fallback (PM #3369, path A).
+
+    When a sandboxed worker performs all dev actions (file writes, tests) but
+    cannot git-commit (sandbox denies writes to the shared .git object store),
+    the outer orchestrator — unsandboxed, inside the parent's repo-lock critical
+    section — commits the worker's in-scope dirty files on its behalf and
+    returns the new head sha.
+
+    Trigger requires ALL of (D2):
+      1. env escape valve open (LOOP_OUTER_COMMIT_FALLBACK != "0");
+      2. whitelist non-empty;
+      3. worktree is a git repo root;
+      4. files_changed non-empty after normalization;
+      5. files_changed ⊆ whitelist (prefix overlap per entry);
+      6. in-scope dirty non-empty (measured, incl. untracked);
+      7. in-scope dirty ⊆ files_changed (measured-vs-declared is the sole
+         anti-forgery check — phantom declarations with no dirt return None);
+      8. no out-of-scope TRACKED dirt (overreach blocker).
+    Any unmet → None → the original no-change path runs unchanged.
+
+    SEMANTIC CHANGE (D6): a worker that deliberately declines to commit while
+    declaring files_changed (previously → blocked via #2911 evidence gating)
+    is now auto-committed when the worktree dirt matches its declaration.
+    """
+    _ = paths
+    if not _outer_commit_fallback_enabled():
+        _log("outer commit fallback: disabled via LOOP_OUTER_COMMIT_FALLBACK=0")
+        return None
+    if not whitelist:
+        _log("outer commit fallback: no owner whitelist; skipping")
+        return None
+    wl = sorted({_normalize_declared_path(w) for w in whitelist if w and w.strip()})
+    if not wl:
+        _log("outer commit fallback: no owner whitelist after normalization; skipping")
+        return None
+    if not _is_git_repo_root(worktree):
+        _log(f"outer commit fallback: {worktree} is not a git repo root; skipping")
+        return None
+    fc = sorted({_normalize_declared_path(p) for p in files_changed if p and p.strip()})
+    if not fc:
+        _log("outer commit fallback: files_changed empty after normalization; skipping")
+        return None
+    if not all(any(_owner_paths_overlap(p, w) for w in wl) for p in fc):
+        _log("outer commit fallback: files_changed outside owner whitelist; skipping")
+        return None
+    dirty_in, out_tracked = _worktree_dirty_split(worktree, wl)
+    if not dirty_in:
+        _log("outer commit fallback: no in-scope dirty files; skipping (phantom declaration)")
+        return None
+    if not set(dirty_in) <= set(fc):
+        _log("outer commit fallback: measured dirty not fully declared; skipping")
+        return None
+    if out_tracked:
+        _log(f"outer commit fallback: out-of-scope tracked dirt {out_tracked}; blocking")
+        return None
+    _log(f"outer commit fallback: committing {dirty_in} on behalf of worker")
+    try:
+        _git_at(worktree, "add", "--", *sorted(dirty_in))
+        _git_at(
+            worktree,
+            "commit",
+            "-m",
+            f"[loop] task {task_id} round {round_num} lane {lane_id}: "
+            "outer commit fallback (worker could not commit) [outer-commit]",
+        )
+        new_head = _git_at(worktree, "rev-parse", "HEAD").strip()
+        _log(f"outer commit fallback: committed -> {new_head[:8]}")
+        return new_head
+    except RuntimeError as exc:
+        _log(f"outer commit fallback: commit failed, degrading to no-change path: {exc}")
+        return None
+
+
 def _git_at(cwd: Path, *args: str, timeout: float | None = DEFAULT_GIT_TIMEOUT_SEC) -> str:
     try:
         result = subprocess.run(
