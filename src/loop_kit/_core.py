@@ -3249,6 +3249,7 @@ def _report_dispatch_result(
     lane_id: str | None = None,
     task_mode: str | None = None,
     paths: LoopPaths | None = None,
+    runtime_fields: dict[str, object] | None = None,
 ) -> None:
     _write_dispatch_log(role, cmd, result, session_id, paths=paths)
     event_type = (
@@ -3282,6 +3283,8 @@ def _report_dispatch_result(
     # mode=DISPATCH_BACKEND_NATIVE key (dispatch mode), distinct semantics.
     if task_mode is not None:
         data["task_mode"] = task_mode
+    if runtime_fields:
+        data.update(runtime_fields)
     _feed_event(
         event_type,
         level=("info" if timeout_sec is None and result.returncode == 0 else "error"),
@@ -3800,6 +3803,9 @@ def _run_auto_dispatch(
                 )
 
             run_fn = _require_registered_backend(backend)[3]
+            # PM #3371: usage payload captured from the dsh SDK events, then
+            # merged into dispatch_complete/fail via _report_dispatch_result.
+            dsh_usage_payload: dict[str, object] = {}
             if run_fn is not None:
                 # PM #2665: in-process dispatch (dsh SDK). Bypasses
                 # _agent_command/Popen/_collect_streamed_process_output and
@@ -3833,6 +3839,7 @@ def _run_auto_dispatch(
                     resume_session_id=active_resume_session_id,
                     summary_callback=_on_summary,
                     actual_cwd=actual_cwd,
+                    usage_callback=lambda payload, holder=dsh_usage_payload: holder.update(payload),
                 )
                 cmd_sid = dsh_sid or active_resume_session_id
                 # Note: active_resume_session_id is intentionally NOT updated
@@ -3932,6 +3939,14 @@ def _run_auto_dispatch(
                         paths=paths,
                     )
                     raise
+            # PM #3371: cost/token runtime fields for in-process (dsh)
+            # dispatch only — subprocess backends pass None (zero change).
+            report_runtime_fields: dict[str, object] | None = None
+            if run_fn is not None:
+                report_runtime_fields = {
+                    key: value
+                    for key, value in _runtime_cost_and_token_fields(dsh_usage_payload, backend=backend).items()
+                }
             if first_meaningful_summary_ms is None:
                 _feed_event(
                     FEED_DISPATCH_FIRST_ACTION,
@@ -3972,6 +3987,7 @@ def _run_auto_dispatch(
                     lane_id=lane_id,
                     task_mode=task_mode,
                     paths=paths,
+                    runtime_fields=report_runtime_fields,
                 )
                 raise DispatchTimeoutError(
                     f"{role} dispatch timeout after {timeout_sec}s (backend={backend})."
@@ -4012,6 +4028,7 @@ def _run_auto_dispatch(
                 lane_id=lane_id,
                 task_mode=task_mode,
                 paths=paths,
+                runtime_fields=report_runtime_fields,
             )
 
             if result.returncode == 0:

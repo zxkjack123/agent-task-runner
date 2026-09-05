@@ -345,3 +345,114 @@ def test_dsh_run_fn_usage_callback_not_called_without_usage(monkeypatch: pytest.
         usage_callback=called.append,
     )
     assert called == []
+
+
+# ── loop-level cost event wiring (PM #3371 T1.3) ─────────────────────────
+
+
+def _fake_inprocess_run_fn(
+    stdout: str = "OK",
+    returncode: int = 0,
+    timed_out: bool = False,
+    usage: dict[str, int] | None = None,
+    session_id: str | None = "sess-cost",
+) -> Any:
+    def run_fn(
+        prompt: str,
+        *,
+        role: str,
+        timeout_sec: int,
+        resume_session_id: str | None,
+        summary_callback: Any,
+        actual_cwd: Path,
+        usage_callback: Any = None,
+    ) -> tuple[str, str, int, bool, str | None]:
+        if usage_callback is not None and usage:
+            usage_callback(usage)
+        return (stdout, "", returncode, timed_out, session_id)
+
+    return run_fn
+
+
+def test_run_auto_dispatch_dsh_complete_carries_cost(monkeypatch: pytest.MonkeyPatch) -> None:
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        orchestrator,
+        "_require_registered_backend",
+        lambda backend: (None, None, None, _fake_inprocess_run_fn(
+            usage={"input_tokens": 189, "output_tokens": 149, "total_tokens": 8146}
+        )),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_require_registered_parse_event",
+        lambda backend: orchestrator._dsh_parse_event,
+    )
+    monkeypatch.setattr(orchestrator, "_log", lambda msg: None)
+    monkeypatch.setattr(
+        orchestrator,
+        "_write_dispatch_log",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_feed_event",
+        lambda event, *, level="info", data=None, paths=None: events.append((event, dict(data or {}))),
+    )
+
+    orchestrator._run_auto_dispatch(
+        "worker",
+        "dsh",
+        "hi",
+        30,
+        dispatch_retries=0,
+    )
+
+    complete = [d for e, d in events if e == orchestrator.FEED_DISPATCH_COMPLETE]
+    assert complete, "no dispatch_complete event"
+    data = complete[0]
+    assert data["backend"] == "dsh"
+    assert data["input_tokens"] == 189
+    assert data["total_tokens"] == 8146
+    # ceil((189*43 + 149*129)/1e6) = ceil((8127 + 19221)/1e6) = ceil(0.027348) = 1
+    assert data["cost_cents"] == 1
+
+
+def test_run_auto_dispatch_dsh_fail_cost_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        orchestrator,
+        "_require_registered_backend",
+        lambda backend: (None, None, None, _fake_inprocess_run_fn(
+            stdout="", returncode=1, timed_out=True, session_id=None
+        )),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_require_registered_parse_event",
+        lambda backend: orchestrator._dsh_parse_event,
+    )
+    monkeypatch.setattr(orchestrator, "_log", lambda msg: None)
+    monkeypatch.setattr(
+        orchestrator,
+        "_write_dispatch_log",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_feed_event",
+        lambda event, *, level="info", data=None, paths=None: events.append((event, dict(data or {}))),
+    )
+
+    with pytest.raises(RuntimeError):
+        orchestrator._run_auto_dispatch(
+            "worker",
+            "dsh",
+            "hi",
+            30,
+            dispatch_retries=0,
+        )
+
+    fail = [d for e, d in events if e == orchestrator.FEED_DISPATCH_FAIL]
+    assert fail, "no dispatch_fail event"
+    assert fail[0].get("cost_cents") == 0
