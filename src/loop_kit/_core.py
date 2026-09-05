@@ -426,6 +426,11 @@ _BACKEND_TOKEN_COST_CENTS_PER_MILLION: dict[str, tuple[int, int]] = {
     BACKEND_CODEX: (150, 600),
     BACKEND_CLAUDE: (300, 1500),
     BACKEND_OPENCODE: (0, 0),
+    # PM #3358: deepseek-v4-flash peak-rate RMB pricing converted at ~7.0
+    # CNY/USD (official page api-docs.deepseek.com, 2026-09-05):
+    # input uncached 3.0 RMB/M -> ~43 cents; output 9.0 RMB/M -> ~129 cents.
+    # Peak rates chosen as the conservative ceiling; off-peak is half.
+    BACKEND_DSH: (43, 129),
 }
 DISPATCH_BACKEND_NATIVE = "native"
 DEFAULT_WORKER_BACKEND = BACKEND_CODEX
