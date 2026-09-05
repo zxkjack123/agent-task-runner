@@ -7687,6 +7687,41 @@ def _try_outer_commit_fallback(
         return None
 
 
+def _lane_outer_commit_fallback(
+    lane_work: dict,
+    lane: TaskLane,
+    handle: LaneWorktreeHandle,
+    *,
+    base_sha: str,
+    task_id: str,
+    round_num: int,
+    paths: LoopPaths | None = None,
+) -> str | None:
+    """Per-lane outer-commit fallback wrapper (PM #3369).
+
+    Pure query: returns the new head sha when the fallback committed, else None.
+    Only considered when the lane's reported head equals (or is missing vs) the
+    round base — a lane whose worker already committed (head advanced) never
+    triggers the fallback.
+    """
+    lane_head = str(lane_work.get("head_sha", "")).strip()
+    if lane_head and lane_head != base_sha:
+        return None
+    owner_paths = lane.get("owner_paths")
+    whitelist = cast(list[str], owner_paths) if isinstance(owner_paths, list) else []
+    declared = lane_work.get("files_changed")
+    files_changed = cast(list[str], declared) if isinstance(declared, list) else []
+    return _try_outer_commit_fallback(
+        worktree=handle.path,
+        whitelist=whitelist,
+        files_changed=files_changed,
+        task_id=task_id,
+        round_num=round_num,
+        lane_id=str(lane.get("lane_id", "")),
+        paths=paths,
+    )
+
+
 def _git_at(cwd: Path, *args: str, timeout: float | None = DEFAULT_GIT_TIMEOUT_SEC) -> str:
     try:
         result = subprocess.run(
@@ -12585,6 +12620,25 @@ def _run_single_round(
                 synthesize_cwd=handle.path,
             )
             lane_work = cast(WorkReport, artifact)
+            # PM #3369: outer-commit fallback (path A). A sandboxed worker (dsh)
+            # may write files and run tests but be unable to git-commit (sandbox
+            # denies writes to the shared .git object store). The unsandboxed
+            # outer orchestrator commits the lane's in-scope dirty files here,
+            # per-lane and BEFORE the merge — the merged report carries no
+            # lane_id, so the per-lane owner whitelist is only reachable now.
+            fallback_head = _lane_outer_commit_fallback(
+                lane_work,
+                lane,
+                handle,
+                base_sha=base_sha,
+                task_id=task_id,
+                round_num=round_num,
+                paths=resolved_paths,
+            )
+            if fallback_head is not None:
+                lane_work["head_sha"] = fallback_head
+                _atomic_write_json(lane_local_report, lane_work)
+                _log(f"Lane {lane_id}: outer commit fallback committed worker changes -> {fallback_head[:8]}")
             artifact_written_latency_ms = max(0, int((time.monotonic() - dispatch_started_at) * 1000))
             _enrich_work_report_runtime_fields(
                 lane_work,

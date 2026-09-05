@@ -236,3 +236,79 @@ def test_fallback_normalizes_declared_paths(monkeypatch: pytest.MonkeyPatch) -> 
     result = orchestrator._try_outer_commit_fallback(**_fallback_kwargs({"files_changed": ["./coupling/fib.py"]}))
     assert result == "feedbeef"
     assert calls["add"] == [["--", "coupling/fib.py"]]
+
+
+# ── lane wrapper (PM #3369 T3.1) ─────────────────────────────────────────
+
+
+def _fake_lane() -> dict:
+    return {"lane_id": "lane_x", "owner_paths": ["coupling/"]}
+
+
+def _fake_handle() -> Any:
+    class _H:
+        path = Path("/wt")
+
+    return _H()
+
+
+def test_lane_fallback_triggers_when_head_equals_base(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        orchestrator,
+        "_try_outer_commit_fallback",
+        lambda **kwargs: "sha123",
+    )
+    work = {"head_sha": "base", "files_changed": ["coupling/fib.py"]}
+    result = orchestrator._lane_outer_commit_fallback(
+        work, _fake_lane(), _fake_handle(), base_sha="base", task_id="t", round_num=1
+    )
+    assert result == "sha123"
+
+
+def test_lane_fallback_triggers_when_head_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        orchestrator,
+        "_try_outer_commit_fallback",
+        lambda **kwargs: "sha456",
+    )
+    work = {"head_sha": "", "files_changed": ["coupling/fib.py"]}
+    result = orchestrator._lane_outer_commit_fallback(
+        work, _fake_lane(), _fake_handle(), base_sha="base", task_id="t", round_num=1
+    )
+    assert result == "sha456"
+
+
+def test_lane_fallback_skips_when_head_advanced(monkeypatch: pytest.MonkeyPatch) -> None:
+    called: list[bool] = []
+
+    def _core(**kwargs: Any) -> str:
+        called.append(True)
+        return "sha"
+
+    monkeypatch.setattr(orchestrator, "_try_outer_commit_fallback", _core)
+    work = {"head_sha": "advanced", "files_changed": ["coupling/fib.py"]}
+    result = orchestrator._lane_outer_commit_fallback(
+        work, _fake_lane(), _fake_handle(), base_sha="base", task_id="t", round_num=1
+    )
+    assert result is None
+    assert called == []
+
+
+def test_lane_fallback_callsite_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def _core(**kwargs: Any) -> str:
+        captured.update(kwargs)
+        return "sha789"
+
+    monkeypatch.setattr(orchestrator, "_try_outer_commit_fallback", _core)
+    work = {"head_sha": "base", "files_changed": ["coupling/fib.py"]}
+    orchestrator._lane_outer_commit_fallback(
+        work, _fake_lane(), _fake_handle(), base_sha="base", task_id="t7", round_num=3
+    )
+    assert captured["worktree"] == Path("/wt")
+    assert captured["whitelist"] == ["coupling/"]
+    assert captured["files_changed"] == ["coupling/fib.py"]
+    assert captured["task_id"] == "t7"
+    assert captured["round_num"] == 3
+    assert captured["lane_id"] == "lane_x"
