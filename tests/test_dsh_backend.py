@@ -286,3 +286,62 @@ def test_extract_dsh_usage_payload_multi_chunk_max_total() -> None:
     events = [chunk(100, 1, 2), chunk(500, 50, 60), chunk(None, 7, 8)]
     payload = orchestrator._extract_dsh_usage_payload(events)
     assert payload == {"input_tokens": 50, "output_tokens": 60, "total_tokens": 500}
+
+
+# ── usage callback (PM #3371 T1.2) ────────────────────────────────────────
+
+
+def test_dsh_run_fn_usage_callback_receives_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    ok = _ok_result()
+    ok.events.append(
+        {
+            "type": "assistant/chunk",
+            "data": {
+                "chunk": {
+                    "type": "usage",
+                    "usage": {
+                        "inputTokens": 189,
+                        "outputTokens": 149,
+                        "totalTokens": 8146,
+                        "cacheReadTokens": 7808,
+                        "reasoningTokens": 67,
+                    },
+                }
+            },
+        }
+    )
+    _install_fake_module(monkeypatch, ok)
+    monkeypatch.setattr(orchestrator, "_log", lambda msg: None)
+    received: list[dict] = []
+
+    stdout, _stderr, returncode, _timed_out, session_id = orchestrator._run_dsh_sdk_dispatch(
+        "hi",
+        role="worker",
+        timeout_sec=30,
+        resume_session_id=None,
+        summary_callback=None,
+        actual_cwd=Path("/tmp"),
+        usage_callback=received.append,
+    )
+    # 5-tuple contract unchanged
+    assert stdout == "OK"
+    assert returncode == 0
+    assert session_id == "sess-1"
+    assert received == [{"input_tokens": 189, "output_tokens": 149, "total_tokens": 8146}]
+
+
+def test_dsh_run_fn_usage_callback_not_called_without_usage(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_fake_module(monkeypatch, _ok_result())
+    monkeypatch.setattr(orchestrator, "_log", lambda msg: None)
+    called: list[dict] = []
+
+    orchestrator._run_dsh_sdk_dispatch(
+        "hi",
+        role="worker",
+        timeout_sec=30,
+        resume_session_id=None,
+        summary_callback=None,
+        actual_cwd=Path("/tmp"),
+        usage_callback=called.append,
+    )
+    assert called == []

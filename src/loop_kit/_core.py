@@ -2951,6 +2951,7 @@ def _run_dsh_sdk_dispatch(
     resume_session_id: str | None,
     summary_callback: Callable[[str], None] | None,
     actual_cwd: Path,
+    usage_callback: Callable[[dict[str, object]], None] | None = None,
 ) -> tuple[str, str, int, bool, str | None]:
     """In-process dsh dispatch via the DeepSeek Harness Python SDK.
 
@@ -3045,6 +3046,10 @@ def _run_dsh_sdk_dispatch(
     stdout_text = result.final_response or ""
     finish_reason = result.finish_reason
     returncode = 0 if finish_reason == "completed" else 1
+    if usage_callback is not None:
+        usage_payload = _extract_dsh_usage_payload(result.events)
+        if usage_payload:
+            usage_callback(usage_payload)
     for event in result.events:
         summary = _dsh_event_summary(role, event)
         if summary is not None and summary_callback is not None:
