@@ -1,0 +1,5 @@
+# dsh sandbox patches（PM #3361，方案 D 步骤 1）
+# 通过 SDK patches 机制注入 sandbox-local 条目。provider 自动探测
+# （Linux: bwrap 优先 → landlock），本机两者均可用（#3357 评估）。
+- id: sandbox
+  name: '@deepseek-ai/dsh-sandbox-local'
