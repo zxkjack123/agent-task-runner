@@ -155,6 +155,37 @@ def test_dsh_run_fn_passes_resume_session_id(monkeypatch: pytest.MonkeyPatch) ->
     assert FakeHarness.instances[0].run_session_id == "resume-42"
 
 
+def test_dsh_run_fn_env_patches_wiring(monkeypatch: pytest.MonkeyPatch) -> None:
+    # PM #3364: LOOP_DSH_PATCHES (colon-separated) -> patches kwarg; absent -> empty tuple.
+    _install_fake_module(monkeypatch, _ok_result())
+    monkeypatch.setattr(orchestrator, "_log", lambda msg: None)
+    monkeypatch.setenv(
+        "LOOP_DSH_PATCHES",
+        "/tmp/a.patch.yml:/tmp/b.patch.yml",
+    )
+
+    orchestrator._run_dsh_sdk_dispatch(
+        "hi",
+        role="worker",
+        timeout_sec=30,
+        resume_session_id=None,
+        summary_callback=None,
+        actual_cwd=Path("/tmp"),
+    )
+    assert FakeHarness.instances[0].kwargs.get("patches") == ("/tmp/a.patch.yml", "/tmp/b.patch.yml")
+
+    monkeypatch.delenv("LOOP_DSH_PATCHES")
+    orchestrator._run_dsh_sdk_dispatch(
+        "hi",
+        role="worker",
+        timeout_sec=30,
+        resume_session_id=None,
+        summary_callback=None,
+        actual_cwd=Path("/tmp"),
+    )
+    assert FakeHarness.instances[1].kwargs.get("patches") == ()
+
+
 def test_dsh_run_fn_import_error_fails_loud(monkeypatch: pytest.MonkeyPatch) -> None:
     # Simulate SDK not installed even though it IS in this venv: a None entry
     # in sys.modules makes import raise ImportError (Python semantics).

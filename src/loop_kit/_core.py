@@ -2935,6 +2935,10 @@ def _run_dsh_sdk_dispatch(
     session_root.mkdir(parents=True, exist_ok=True)
     dsh_home.mkdir(parents=True, exist_ok=True)
     normalized_sid = SessionManager.normalize_session_id(resume_session_id)
+    # PM #3364: optional cordis patch files via LOOP_DSH_PATCHES (colon-separated
+    # paths, like PATH). Absent -> empty tuple -> SDK built-in cordis (back-compat).
+    raw_patches = os.environ.get("LOOP_DSH_PATCHES", "")
+    dsh_patches: tuple[str, ...] = tuple(p for p in (part.strip() for part in raw_patches.split(os.pathsep)) if p)
 
     harness: DeepSeekHarness | None = None
     result_holder: dict[str, object] = {}
@@ -2948,6 +2952,7 @@ def _run_dsh_sdk_dispatch(
                 cwd=str(actual_cwd),
                 dsh_home=str(dsh_home),
                 env={"DSH_SESSION_ROOT": str(session_root)},
+                patches=dsh_patches,
             )
             result_holder["harness"] = h
             result_holder["result"] = h.run(prompt, session_id=normalized_sid)
