@@ -1,0 +1,72 @@
+[
+  {
+    "backend": "dsh",
+    "idx": 1,
+    "wall_s": 245.3,
+    "outcome": "approved",
+    "error": ""
+  },
+  {
+    "backend": "dsh",
+    "idx": 2,
+    "wall_s": 187.3,
+    "outcome": "approved",
+    "error": ""
+  },
+  {
+    "backend": "dsh",
+    "idx": 3,
+    "wall_s": 161.8,
+    "outcome": "approved",
+    "error": ""
+  },
+  {
+    "backend": "dsh",
+    "idx": 4,
+    "wall_s": 659.1,
+    "outcome": "approved",
+    "error": ""
+  },
+  {
+    "backend": "dsh",
+    "idx": 5,
+    "wall_s": 202.2,
+    "outcome": "approved",
+    "error": ""
+  },
+  {
+    "backend": "opencode",
+    "idx": 1,
+    "wall_s": 593.4,
+    "outcome": "not_converged",
+    "error": "Error: single-round subprocess failed for round=1 rc=3"
+  },
+  {
+    "backend": "opencode",
+    "idx": 2,
+    "wall_s": 260.9,
+    "outcome": "approved",
+    "error": ""
+  },
+  {
+    "backend": "opencode",
+    "idx": 3,
+    "wall_s": 509.4,
+    "outcome": "approved",
+    "error": ""
+  },
+  {
+    "backend": "opencode",
+    "idx": 4,
+    "wall_s": 202.1,
+    "outcome": "approved",
+    "error": ""
+  },
+  {
+    "backend": "opencode",
+    "idx": 5,
+    "wall_s": 459.9,
+    "outcome": "approved",
+    "error": ""
+  }
+]
