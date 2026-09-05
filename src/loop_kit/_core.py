@@ -3773,6 +3773,12 @@ def _run_auto_dispatch(
                     actual_cwd=actual_cwd,
                 )
                 cmd_sid = dsh_sid or active_resume_session_id
+                # Note: active_resume_session_id is intentionally NOT updated
+                # from dsh_sid here. The subprocess path has the same
+                # semantics — the resume session is only invalidated
+                # (set to None) on resume errors, never re-derived between
+                # attempts. Aligning dsh with the three subprocess backends
+                # keeps attempt-to-attempt resume behaviour symmetric.
             else:
                 if active_resume_session_id is None:
                     cmd, cmd_sid, stdin_text = _agent_command(backend, prompt)

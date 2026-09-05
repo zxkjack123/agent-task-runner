@@ -2,6 +2,8 @@
 
 - 日期：2026-09-05
 - 执行仓库：agent-task-runner（worktree `.loop/worktrees/dsh-pilot`，分支 `pilot/dsh-t4`，已保留未合并）
+- 试点 base_sha：`b8618e51d82017e2a617c3a4b759669c2592b4f2`（master @ T2.1 task card commit）；试点 head_sha：同为 b8618e5（worker 无执行通道无法提交，head_sha==base_sha 即本试点的核心证据链之一）
+- 实施完成时 master HEAD：`72303f5`（9 个 #2665 commit）
 - 试点 task：`dsh-pilot-T4`（coupling/dsh-pilot/ fib 模块微任务）
 - 预算声明：总真实 dispatch ≤4；实际消耗 **1 次 worker dispatch（148s）+ 1 次 SDK 冒烟探针**（另有 2 次 ImportError 快速失败未触达 API）；`--dispatch-retries 0`、`--max-rounds 2`、`--dispatch-timeout 1800`、`max_tokens ≤ 49152`
 
@@ -52,6 +54,15 @@ VERDICT: FAIL（试点判定 = CONDITIONAL，见下）
 
 - 主失败模式：**environment-blocked（bash 执行被 sandbox 拒绝）**——M3 分类脚本无此类别（计划 M3 未预见"整个执行通道缺失"），建议 follow-up 在评测脚本补该分类。
 - 无越界工具调用证据（worker 无法执行任何工具，权限差距以"能力缺失"形态暴露而非"越界"形态）。
+
+## 证据归档声明（验收 O3 修正）
+
+试点运行证据（work_report.json、主 transcript、state.json、events.jsonl）位于已 prune 的 worktree `.loop/worktrees/dsh-pilot/.loop/` 内，**prune 时未单独归档，现已无法独立复核**。以下证据留存并可复核：
+- 2 个 SDK 冒烟 session transcript（zstd，`/tmp/dsh-acp-smoke-home/sessions/` 与 `/tmp` 下 dsh-home）——验收独立实测解压后含 assistant/message + turn/end 事件
+- 本报告引用自 work_report.json 的原文摘录（"Execution blocked by the environment…" 段）——该引用为 prune 前抄录，作为证据链的主文本
+- ACP 冒烟 README（`coupling/dsh-acp-smoke/README.md`，ACP_OK + notifications=1987）
+
+**Follow-up 建议**：后续 R6 类计划应增加「prune 前归档 transcript + work_report」步骤，避免审计证据随 worktree 清理丢失。
 
 ## 回滚说明
 
