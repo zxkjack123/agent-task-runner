@@ -456,3 +456,65 @@ def test_run_auto_dispatch_dsh_fail_cost_zero(monkeypatch: pytest.MonkeyPatch) -
     fail = [d for e, d in events if e == orchestrator.FEED_DISPATCH_FAIL]
     assert fail, "no dispatch_fail event"
     assert fail[0].get("cost_cents") == 0
+
+
+# ── provider fallback chain: resolver (PM #3379 T1.1) ────────────────────
+
+
+def test_resolve_dsh_channels_default_single_deepseek(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("LOOP_DSH_PROVIDER_CHAIN", raising=False)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "dk-123")
+    channels = orchestrator._resolve_dsh_channels()
+    assert channels == [("deepseek", "https://api.deepseek.com/v1", "dk-123")]
+
+
+def test_resolve_dsh_channels_comma_separated(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LOOP_DSH_PROVIDER_CHAIN", "deepseek,360ai")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "dk-1")
+    monkeypatch.setenv("AI360_API_KEY", "ai360-1")
+    channels = orchestrator._resolve_dsh_channels()
+    assert channels == [
+        ("deepseek", "https://api.deepseek.com/v1", "dk-1"),
+        ("360ai", "https://api.360.cn/v1", "ai360-1"),
+    ]
+
+
+def test_resolve_dsh_channels_base_url_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LOOP_DSH_PROVIDER_CHAIN", "deepseek")
+    monkeypatch.setenv("LOOP_DSH_BASE_URL_DEEPSEEK", "https://custom.deepseek/v1")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "dk-2")
+    channels = orchestrator._resolve_dsh_channels()
+    assert channels[0][1] == "https://custom.deepseek/v1"
+
+
+def test_resolve_dsh_channels_unknown_id_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LOOP_DSH_PROVIDER_CHAIN", "mystery")
+    with pytest.raises(ValueError, match="unknown dsh channel"):
+        orchestrator._resolve_dsh_channels()
+
+
+def test_resolve_dsh_channels_empty_string_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LOOP_DSH_PROVIDER_CHAIN", "  ")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "dk-3")
+    channels = orchestrator._resolve_dsh_channels()
+    assert len(channels) == 1
+    assert channels[0][0] == "deepseek"
+
+
+def test_dsh_run_fn_passes_base_url_and_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_fake_module(monkeypatch, _ok_result())
+    monkeypatch.setattr(orchestrator, "_log", lambda msg: None)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "dk-wired")
+    monkeypatch.delenv("LOOP_DSH_PROVIDER_CHAIN", raising=False)
+
+    orchestrator._run_dsh_sdk_dispatch(
+        "hi",
+        role="worker",
+        timeout_sec=30,
+        resume_session_id=None,
+        summary_callback=None,
+        actual_cwd=Path("/tmp"),
+    )
+    kw = FakeHarness.instances[0].kwargs
+    assert kw.get("base_url") == "https://api.deepseek.com/v1"
+    assert kw.get("api_key") == "dk-wired"

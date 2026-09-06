@@ -2840,6 +2840,42 @@ def _opencode_parse_event(role: str, backend: str, line: str) -> str | None:
 # through the SDK path (_run_dsh_sdk_dispatch, registered as the 4th slot
 # run_fn).
 
+# PM #3379: provider fallback chain. Built-in channel table maps a channel id
+# to its base_url and the env var name holding its api key. The chain order
+# (and thus fallback priority) is configured via LOOP_DSH_PROVIDER_CHAIN.
+_DSH_DEFAULT_CHANNELS: dict[str, dict[str, str]] = {
+    "deepseek": {
+        "base_url": "https://api.deepseek.com/v1",
+        "api_key_env": "DEEPSEEK_API_KEY",
+    },
+    "360ai": {
+        "base_url": "https://api.360.cn/v1",
+        "api_key_env": "AI360_API_KEY",
+    },
+}
+
+
+def _resolve_dsh_channels() -> list[tuple[str, str, str]]:
+    """Resolve the dsh provider channel chain to [(channel_id, base_url, api_key)].
+
+    PM #3379. Order = fallback priority. LOOP_DSH_PROVIDER_CHAIN is a
+    comma-separated channel-id list (default ``deepseek`` for back-compat).
+    Each channel's base_url may be overridden via LOOP_DSH_BASE_URL_<CH_UPPER>;
+    api key value is read from the channel's api_key_env var. Unknown ids
+    raise ValueError (caller fails loud) rather than being silently skipped.
+    """
+    raw = os.environ.get("LOOP_DSH_PROVIDER_CHAIN", "")
+    ids = [c.strip() for c in raw.split(",") if c.strip()] or ["deepseek"]
+    channels: list[tuple[str, str, str]] = []
+    for cid in ids:
+        spec = _DSH_DEFAULT_CHANNELS.get(cid)
+        if spec is None:
+            raise ValueError(f"unknown dsh channel: {cid!r}")
+        base_url = os.environ.get(f"LOOP_DSH_BASE_URL_{cid.upper()}", spec["base_url"])
+        api_key = os.environ.get(spec["api_key_env"], "")
+        channels.append((cid, base_url, api_key))
+    return channels
+
 
 def _build_dsh_command(
     exe: str,
@@ -2987,6 +3023,12 @@ def _run_dsh_sdk_dispatch(
     # paths, like PATH). Absent -> empty tuple -> SDK built-in cordis (back-compat).
     raw_patches = os.environ.get("LOOP_DSH_PATCHES", "")
     dsh_patches: tuple[str, ...] = tuple(p for p in (part.strip() for part in raw_patches.split(os.pathsep)) if p)
+    # PM #3379: provider fallback chain (deepseek 官网 → 360ai). Unknown
+    # channel ids fail loud via ValueError (config error, no silent skip).
+    try:
+        channels = _resolve_dsh_channels()
+    except ValueError as exc:
+        return ("", f"dsh config error: {exc}", 1, False, normalized_sid)
 
     harness: DeepSeekHarness | None = None
     result_holder: dict[str, object] = {}
@@ -3001,6 +3043,8 @@ def _run_dsh_sdk_dispatch(
                 dsh_home=str(dsh_home),
                 env={"DSH_SESSION_ROOT": str(session_root)},
                 patches=dsh_patches,
+                base_url=channels[0][1],
+                api_key=channels[0][2],
             )
             result_holder["harness"] = h
             result_holder["result"] = h.run(prompt, session_id=normalized_sid)
