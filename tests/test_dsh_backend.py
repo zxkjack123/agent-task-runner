@@ -738,3 +738,85 @@ def test_dsh_fallback_usage_callback_once_for_winner(monkeypatch: pytest.MonkeyP
     assert session_id == "sess-360"
     # usage callback fired exactly once, from the winning (2nd) channel.
     assert received == [{"input_tokens": 100, "output_tokens": 50, "total_tokens": 150}]
+
+
+# ── provider fallback chain: config parsing matrix (PM #3379 T2.2) ─────────
+
+
+def test_resolve_dsh_channels_whitespace_tolerant(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LOOP_DSH_PROVIDER_CHAIN", "deepseek, 360ai")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "dk-1")
+    monkeypatch.setenv("AI360_API_KEY", "ai360-1")
+    channels = orchestrator._resolve_dsh_channels()
+    assert channels == [
+        ("deepseek", "https://api.deepseek.com/v1", "dk-1"),
+        ("360ai", "https://api.360.cn/v1", "ai360-1"),
+    ]
+
+
+def test_resolve_dsh_channels_trailing_comma_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LOOP_DSH_PROVIDER_CHAIN", "deepseek,")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "dk-1")
+    channels = orchestrator._resolve_dsh_channels()
+    assert channels == [("deepseek", "https://api.deepseek.com/v1", "dk-1")]
+
+
+def test_dsh_fallback_chain_order_reversal(monkeypatch: pytest.MonkeyPatch) -> None:
+    # "360ai,deepseek" reverses priority: the first harness must use the 360
+    # base_url; config change only, no code change (D2).
+    second = FakeRunResult("sess-ds", "OKDS", "completed", [], [])
+    _install_channel_factory(
+        monkeypatch,
+        fault_urls={"https://api.360.cn/v1"},
+        results={"https://api.deepseek.com/v1": second},
+    )
+    monkeypatch.setattr(orchestrator, "_log", lambda msg: None)
+    monkeypatch.setenv("LOOP_DSH_PROVIDER_CHAIN", "360ai,deepseek")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "dk-1")
+    monkeypatch.setenv("AI360_API_KEY", "ai360-1")
+
+    stdout, _stderr, returncode, _timed_out, session_id = orchestrator._run_dsh_sdk_dispatch(
+        "hi",
+        role="worker",
+        timeout_sec=30,
+        resume_session_id=None,
+        summary_callback=None,
+        actual_cwd=Path("/tmp"),
+    )
+
+    assert stdout == "OKDS"
+    assert returncode == 0
+    assert session_id == "sess-ds"
+    assert len(FakeHarness.instances) == 2
+    assert FakeHarness.instances[0].kwargs["base_url"] == "https://api.360.cn/v1"
+    assert FakeHarness.instances[1].kwargs["base_url"] == "https://api.deepseek.com/v1"
+    # D5: provider kwarg carries the channel id (identity marker).
+    assert FakeHarness.instances[0].kwargs["provider"] == "360ai"
+    assert FakeHarness.instances[1].kwargs["provider"] == "deepseek"
+
+
+def test_dsh_fallback_model_global_transparent(monkeypatch: pytest.MonkeyPatch) -> None:
+    # LOOP_DSH_MODEL is channel-agnostic: every harness in the chain gets the
+    # same model kwarg.
+    second = FakeRunResult("sess-360", "OK360", "completed", [], [])
+    _install_channel_factory(
+        monkeypatch,
+        fault_urls={"https://api.deepseek.com/v1"},
+        results={"https://api.360.cn/v1": second},
+    )
+    monkeypatch.setattr(orchestrator, "_log", lambda msg: None)
+    monkeypatch.setenv("LOOP_DSH_PROVIDER_CHAIN", "deepseek,360ai")
+    monkeypatch.setenv("LOOP_DSH_MODEL", "deepseek-v4-custom")
+
+    orchestrator._run_dsh_sdk_dispatch(
+        "hi",
+        role="worker",
+        timeout_sec=30,
+        resume_session_id=None,
+        summary_callback=None,
+        actual_cwd=Path("/tmp"),
+    )
+
+    assert len(FakeHarness.instances) == 2
+    assert FakeHarness.instances[0].kwargs["model"] == "deepseek-v4-custom"
+    assert FakeHarness.instances[1].kwargs["model"] == "deepseek-v4-custom"
