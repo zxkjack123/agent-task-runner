@@ -57,6 +57,50 @@ class FakeHarnessError(Exception):
     pass
 
 
+class _ChannelAwareHarness(FakeHarness):
+    """Fake harness whose run() raises FakeHarnessError when its base_url
+    kwarg is in fault_urls (fault-driven fallback tests, PM #3379 T1.2)."""
+
+    def __init__(self, fault_urls: set[str], results: dict[str, FakeRunResult], **kwargs: Any) -> None:
+        default_result = next(iter(results.values())) if results else _ok_result()
+        super().__init__(results.get(kwargs.get("base_url", ""), default_result), **kwargs)
+        self._fault_urls = fault_urls
+
+    def run(self, input: str, *, session_id: str | None = None, on_notification: Any = None) -> FakeRunResult:
+        if self.kwargs.get("base_url") in self._fault_urls:
+            raise FakeHarnessError("channel fault")
+        return super().run(input, session_id=session_id, on_notification=on_notification)
+
+
+class _CrashingHarness(FakeHarness):
+    """Fake harness whose run() raises a non-HarnessError (unexpected bug)."""
+
+    def run(self, input: str, *, session_id: str | None = None, on_notification: Any = None) -> FakeRunResult:
+        raise RuntimeError("unexpected internal error")
+
+
+def _install_channel_factory(
+    monkeypatch: pytest.MonkeyPatch,
+    fault_urls: set[str],
+    results: dict[str, FakeRunResult] | None = None,
+) -> None:
+    """Install a fake deepseek_harness whose constructor routes by base_url:
+    channels whose base_url is in fault_urls fault on run(); the rest return
+    their mapped FakeRunResult (default _ok_result())."""
+    module = types.ModuleType("deepseek_harness")
+    errors_module = types.ModuleType("deepseek_harness.errors")
+    errors_module.HarnessError = FakeHarnessError  # type: ignore[attr-defined]
+    module.errors = errors_module  # type: ignore[attr-defined]
+    results = results or {}
+
+    def _factory(**kwargs: Any) -> FakeHarness:
+        return _ChannelAwareHarness(fault_urls, results, **kwargs)
+
+    module.DeepSeekHarness = _factory  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "deepseek_harness", module)
+    monkeypatch.setitem(sys.modules, "deepseek_harness.errors", errors_module)
+
+
 @pytest.fixture(autouse=True)
 def _reset_fake_harness_instances() -> None:
     FakeHarness.instances = []
@@ -232,7 +276,9 @@ def test_dsh_run_fn_harness_error_returns_rc1(monkeypatch: pytest.MonkeyPatch) -
     )
 
     assert returncode == 1
-    assert "dsh HarnessError: FakeHarnessError: boom" in _stderr
+    # PM #3379 T1.2: single-channel HarnessError now exhausts the fallback
+    # loop → "all channels failed" (fault-driven loop, not the legacy branch).
+    assert "dsh all channels failed (last: FakeHarnessError: boom)" in _stderr
     assert timed_out is False
 
 
@@ -271,9 +317,10 @@ def test_extract_dsh_usage_payload_empty() -> None:
     assert orchestrator._extract_dsh_usage_payload([]) == {}
     assert orchestrator._extract_dsh_usage_payload(None) == {}
     assert orchestrator._extract_dsh_usage_payload([{"type": "assistant/message"}]) == {}
-    assert orchestrator._extract_dsh_usage_payload(
-        [{"type": "assistant/chunk", "data": {"chunk": {"type": "text"}}}]
-    ) == {}
+    assert (
+        orchestrator._extract_dsh_usage_payload([{"type": "assistant/chunk", "data": {"chunk": {"type": "text"}}}])
+        == {}
+    )
 
 
 def test_extract_dsh_usage_payload_multi_chunk_max_total() -> None:
@@ -379,9 +426,12 @@ def test_run_auto_dispatch_dsh_complete_carries_cost(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(
         orchestrator,
         "_require_registered_backend",
-        lambda backend: (None, None, None, _fake_inprocess_run_fn(
-            usage={"input_tokens": 189, "output_tokens": 149, "total_tokens": 8146}
-        )),
+        lambda backend: (
+            None,
+            None,
+            None,
+            _fake_inprocess_run_fn(usage={"input_tokens": 189, "output_tokens": 149, "total_tokens": 8146}),
+        ),
     )
     monkeypatch.setattr(
         orchestrator,
@@ -423,9 +473,12 @@ def test_run_auto_dispatch_dsh_fail_cost_zero(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(
         orchestrator,
         "_require_registered_backend",
-        lambda backend: (None, None, None, _fake_inprocess_run_fn(
-            stdout="", returncode=1, timed_out=True, session_id=None
-        )),
+        lambda backend: (
+            None,
+            None,
+            None,
+            _fake_inprocess_run_fn(stdout="", returncode=1, timed_out=True, session_id=None),
+        ),
     )
     monkeypatch.setattr(
         orchestrator,
@@ -518,3 +571,96 @@ def test_dsh_run_fn_passes_base_url_and_api_key(monkeypatch: pytest.MonkeyPatch)
     kw = FakeHarness.instances[0].kwargs
     assert kw.get("base_url") == "https://api.deepseek.com/v1"
     assert kw.get("api_key") == "dk-wired"
+
+
+# ── provider fallback chain: fault-driven loop (PM #3379 T1.2) ────────────
+
+
+def test_dsh_fallback_fault_then_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    second = FakeRunResult("sess-360", "OK360", "completed", [], [])
+    _install_channel_factory(
+        monkeypatch,
+        fault_urls={"https://api.deepseek.com/v1"},
+        results={"https://api.360.cn/v1": second},
+    )
+    monkeypatch.setattr(orchestrator, "_log", lambda msg: None)
+    monkeypatch.setenv("LOOP_DSH_PROVIDER_CHAIN", "deepseek,360ai")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "dk-1")
+    monkeypatch.setenv("AI360_API_KEY", "ai360-1")
+
+    stdout, _stderr, returncode, timed_out, session_id = orchestrator._run_dsh_sdk_dispatch(
+        "hi",
+        role="worker",
+        timeout_sec=30,
+        resume_session_id=None,
+        summary_callback=None,
+        actual_cwd=Path("/tmp"),
+    )
+
+    assert stdout == "OK360"
+    assert returncode == 0
+    assert timed_out is False
+    assert session_id == "sess-360"
+    assert len(FakeHarness.instances) == 2
+    assert FakeHarness.instances[0].kwargs["base_url"] == "https://api.deepseek.com/v1"
+    assert FakeHarness.instances[1].kwargs["base_url"] == "https://api.360.cn/v1"
+    # Faulted channel closed on fallback; winner closed on the success path.
+    assert FakeHarness.instances[0].closed is True
+    assert FakeHarness.instances[1].closed is True
+
+
+def test_dsh_fallback_all_channels_fault(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_channel_factory(
+        monkeypatch,
+        fault_urls={"https://api.deepseek.com/v1", "https://api.360.cn/v1"},
+    )
+    monkeypatch.setattr(orchestrator, "_log", lambda msg: None)
+    monkeypatch.setenv("LOOP_DSH_PROVIDER_CHAIN", "deepseek,360ai")
+
+    stdout, stderr, returncode, timed_out, _session_id = orchestrator._run_dsh_sdk_dispatch(
+        "hi",
+        role="worker",
+        timeout_sec=30,
+        resume_session_id=None,
+        summary_callback=None,
+        actual_cwd=Path("/tmp"),
+    )
+
+    assert stdout == ""
+    assert returncode == 1
+    assert timed_out is False
+    assert "dsh all channels failed" in stderr
+    assert "FakeHarnessError" in stderr
+    assert len(FakeHarness.instances) == 2
+    # Both faulted harnesses were closed during the loop.
+    assert all(h.closed for h in FakeHarness.instances)
+
+
+def test_dsh_fallback_non_harness_error_no_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    # RuntimeError is an unexpected internal bug, not a fault-class error →
+    # fail loud immediately, no fallback to the second channel.
+    module = types.ModuleType("deepseek_harness")
+    errors_module = types.ModuleType("deepseek_harness.errors")
+    errors_module.HarnessError = FakeHarnessError  # type: ignore[attr-defined]
+    module.errors = errors_module  # type: ignore[attr-defined]
+    module.DeepSeekHarness = lambda **kwargs: _CrashingHarness(_ok_result(), **kwargs)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "deepseek_harness", module)
+    monkeypatch.setitem(sys.modules, "deepseek_harness.errors", errors_module)
+    monkeypatch.setattr(orchestrator, "_log", lambda msg: None)
+    monkeypatch.setenv("LOOP_DSH_PROVIDER_CHAIN", "deepseek,360ai")
+
+    stdout, stderr, returncode, timed_out, _session_id = orchestrator._run_dsh_sdk_dispatch(
+        "hi",
+        role="worker",
+        timeout_sec=30,
+        resume_session_id=None,
+        summary_callback=None,
+        actual_cwd=Path("/tmp"),
+    )
+
+    assert stdout == ""
+    assert returncode == 1
+    assert timed_out is False
+    assert "dsh-sdk error: RuntimeError" in stderr
+    assert "all channels failed" not in stderr
+    assert len(FakeHarness.instances) == 1  # no fallback attempted

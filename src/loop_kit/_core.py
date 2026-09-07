@@ -3008,7 +3008,6 @@ def _run_dsh_sdk_dispatch(
             None,
         )
 
-    provider = os.environ.get("LOOP_DSH_PROVIDER", "deepseek-official")
     model = os.environ.get("LOOP_DSH_MODEL", "deepseek-v4-flash")
     try:
         max_tokens = int(os.environ.get("LOOP_DSH_MAX_TOKENS", "49152"))
@@ -3034,22 +3033,43 @@ def _run_dsh_sdk_dispatch(
     result_holder: dict[str, object] = {}
 
     def _run_in_worker() -> None:
-        try:
-            h = DeepSeekHarness(
-                provider=provider,
-                model=model,
-                max_tokens=max_tokens,
-                cwd=str(actual_cwd),
-                dsh_home=str(dsh_home),
-                env={"DSH_SESSION_ROOT": str(session_root)},
-                patches=dsh_patches,
-                base_url=channels[0][1],
-                api_key=channels[0][2],
-            )
-            result_holder["harness"] = h
-            result_holder["result"] = h.run(prompt, session_id=normalized_sid)
-        except BaseException as exc:
-            result_holder["error"] = exc
+        # PM #3379: fault-driven fallback loop. Each channel gets its own
+        # harness; a fault-class error (HarnessError) closes the harness and
+        # falls back to the next channel. Business failures (finish_reason !=
+        # completed) are a normal return and never enter this exception path.
+        # Non-HarnessError BaseException is an unexpected internal bug -> fail
+        # loud, no fallback.
+        last_error: BaseException | None = None
+        for cid, base_url, api_key in channels:
+            h: DeepSeekHarness | None = None
+            try:
+                h = DeepSeekHarness(
+                    provider=cid,
+                    model=model,
+                    max_tokens=max_tokens,
+                    cwd=str(actual_cwd),
+                    dsh_home=str(dsh_home),
+                    env={"DSH_SESSION_ROOT": str(session_root)},
+                    patches=dsh_patches,
+                    base_url=base_url,
+                    api_key=api_key,
+                )
+                result_holder["harness"] = h
+                result_holder["result"] = h.run(prompt, session_id=normalized_sid)
+                result_holder["channel"] = cid
+                return
+            except HarnessError as exc:
+                last_error = exc
+                if h is not None:
+                    with contextlib.suppress(Exception):
+                        h.close()
+                _log(f"[dsh] channel {cid} fault ({type(exc).__name__}): {exc}; falling back")
+                continue
+            except BaseException as exc:
+                result_holder["error"] = exc
+                return
+        result_holder["error"] = last_error or RuntimeError("no dsh channels")
+        result_holder["exhausted"] = True
 
     worker = threading.Thread(target=_run_in_worker, daemon=True, name="dsh-sdk-dispatch")
     worker.start()
@@ -3073,6 +3093,8 @@ def _run_dsh_sdk_dispatch(
             with contextlib.suppress(Exception):
                 harness.close()
         exc = error if isinstance(error, BaseException) else RuntimeError(str(error))
+        if result_holder.get("exhausted"):
+            return ("", f"dsh all channels failed (last: {type(exc).__name__}: {exc})", 1, False, normalized_sid)
         if isinstance(exc, HarnessError):
             return ("", f"dsh HarnessError: {type(exc).__name__}: {exc}", 1, False, normalized_sid)
         return ("", f"dsh-sdk error: {type(exc).__name__}: {exc}", 1, False, normalized_sid)
