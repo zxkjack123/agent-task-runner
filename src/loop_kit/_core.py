@@ -13499,6 +13499,7 @@ def _run_single_round(
                     paths=resolved_paths,
                     cleanup_fn=_cleanup_lane_worktrees,
                     archive_fn=_archive_single_round_state,
+                    task_card=task_card,
                 )
             except ValidationError as _noop_err:
                 if config.worker_noop_as_error:
@@ -14603,6 +14604,56 @@ def _resolve_noop_evidence(
     return _noop_evidence_from_round_details(state, round_num, run_id)
 
 
+# Keep in sync with project_management/src/auto_task/bridge.py
+# _LONG_ARTIFACT_FORMATS (bridge.py:37). Doc-type formats whose workers may
+# deliver non-repo artifacts (PM DB records, reports, ...). Used ONLY as the
+# eligibility gate for work-report tests readback evidence — NOT for timeout
+# classification (that is the PM-side semantics).
+_DOC_EVIDENCE_OUTPUT_FORMATS: tuple[str, ...] = ("doc", "report", "slides", "analysis", "summary")
+
+
+def _resolve_work_tests_evidence(
+    work: WorkReport,
+    output_format: str,
+) -> dict | None:
+    """Resolve work-report tests as verification-readback evidence (PM #3409).
+
+    Eligibility is fail-closed (#2911 red line: notes never count):
+      * ``output_format`` (case-insensitive) must be a doc-type format;
+      * ``work["tests"]`` must be a non-empty list;
+      * every entry must be a dict with non-empty ``name``, non-empty
+        ``output`` and ``result == "pass"`` — a bare {"result": "pass"}
+        carries no readback anchor and is NOT evidence (Red-Team F-1).
+    Returns {"source": "work_tests", "detail": ..., "tests": [names]} with
+    test *names only* persisted (free-text output stays out of state/summary,
+    Red-Team F-8). Returns None for any ineligible shape.
+    """
+    fmt = str(output_format or "code").lower()
+    if fmt not in _DOC_EVIDENCE_OUTPUT_FORMATS:
+        return None
+    tests = work.get("tests")
+    if not isinstance(tests, list) or not tests:
+        return None
+    names: list[str] = []
+    for item in tests:
+        if not isinstance(item, dict):
+            return None
+        name = item.get("name")
+        output = item.get("output")
+        if not isinstance(name, str) or not name.strip():
+            return None
+        if not isinstance(output, str) or not output.strip():
+            return None
+        if item.get("result") != "pass":
+            return None
+        names.append(name.strip())
+    return {
+        "source": "work_tests",
+        "detail": f"verification readback evidence: {len(names)}/{len(names)} tests passed",
+        "tests": names,
+    }
+
+
 def _git_toplevel() -> Path:
     """Best-effort git repository root; falls back to ``ROOT`` when unavailable."""
     try:
@@ -14682,6 +14733,7 @@ def _single_round_handle_worker_noop(
     paths: LoopPaths | None = None,
     cleanup_fn: Callable[[], None] | None = None,
     archive_fn: Callable[[], None] | None = None,
+    task_card: dict | None = None,
 ) -> None:
     resolved_paths = _resolve_paths(paths)
     noop_message = (
@@ -14689,12 +14741,13 @@ def _single_round_handle_worker_noop(
         f"head_sha == base_sha ({head_sha}). task_id={task_id} round={round_num}"
     )
     external_evidence = _resolve_external_output_evidence(work, resolved_paths)
+    tests_evidence = _resolve_work_tests_evidence(work, str((task_card or {}).get("output_format", "code")))
     historical_evidence = (
         _resolve_noop_evidence(state, task_id, round_num, run_id, resolved_paths)
         if (config.worker_noop_as_error and config.worker_noop_evidence_gating)
         else None
     )
-    evidence = external_evidence or historical_evidence
+    evidence = external_evidence or tests_evidence or historical_evidence
     take_success = (not config.worker_noop_as_error) or evidence is not None
     round_detail = {
         "round": round_num,
