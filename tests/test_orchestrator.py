@@ -5862,6 +5862,289 @@ def test_single_round_no_change_empty_output_files_still_fails(tmp_path: Path, m
     assert "no code changes" in state["error"]
 
 
+# ── PM #3409: doc-type work-report tests as readback evidence ────────────────
+
+
+def test_single_round_no_change_doc_tests_readback_evidence_success(tmp_path: Path, monkeypatch) -> None:
+    # Positive: doc-format task, work_report tests with name+output+pass →
+    # readback evidence, success (no reviewer).
+    _configure_loop_paths(monkeypatch, tmp_path)
+
+    task_path = tmp_path / "task_input.json"
+    task_path.write_text(
+        json.dumps(
+            {"task_id": "T-604", "goal": "doc tests readback", "output_format": "doc"},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    orchestrator.STATE_FILE.write_text(
+        json.dumps(_noop_state_payload(round_num=1), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(orchestrator, "_git_toplevel", lambda: tmp_path / "repo")
+
+    def fake_wait(path: Path, description: str, **kwargs) -> dict | None:
+        _ = (description, kwargs)
+        if path == orchestrator.WORK_REPORT:
+            return {
+                "task_id": "T-604",
+                "round": 1,
+                "head_sha": "head-ref",
+                "files_changed": [],
+                "tests": [
+                    {"name": "readback-01", "output": "42 passed in 1.2s", "result": "pass"},
+                ],
+                "notes": "noop",
+            }
+        if path == orchestrator.REVIEW_REPORT:
+            raise AssertionError("reviewer should not run when work_tests evidence exists")
+        return None
+
+    monkeypatch.setattr(orchestrator, "_wait_for_file", fake_wait)
+    monkeypatch.setattr(orchestrator, "_is_git_repo_root", lambda _path: True)
+    monkeypatch.setattr(
+        orchestrator,
+        "_resolve_commit_oid",
+        lambda ref: {"base-ref": "same-oid", "head-ref": "same-oid", "same-oid": "same-oid"}[ref],
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_diff",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("diff should not run")),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_log_oneline",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("log should not run")),
+    )
+
+    orchestrator.cmd_run(
+        _run_config(str(task_path), allow_dirty=True),
+        single_round=True,
+        round_num=1,
+    )
+
+    state = json.loads(orchestrator.STATE_FILE.read_text(encoding="utf-8"))
+    summary = json.loads((orchestrator.LOOP_DIR / "summary.json").read_text(encoding="utf-8"))
+    assert state["outcome"] == "no_change_success"
+    assert summary["round_details"][-1]["no_change_evidence"]["source"] == "work_tests"
+    assert summary["round_details"][-1]["review_decision"] == "skipped_no_change_evidence"
+    assert (orchestrator.LOOP_DIR / "review_request.json").exists() is False
+
+
+def test_single_round_no_change_doc_empty_tests_still_fails(tmp_path: Path, monkeypatch) -> None:
+    # Negative: doc format but empty tests → no readback evidence, still fails.
+    _configure_loop_paths(monkeypatch, tmp_path)
+
+    task_path = tmp_path / "task_input.json"
+    task_path.write_text(
+        json.dumps(
+            {"task_id": "T-604", "goal": "doc empty tests", "output_format": "doc"},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    orchestrator.STATE_FILE.write_text(
+        json.dumps(_noop_state_payload(round_num=1), ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_wait_for_file",
+        lambda path, description, **kwargs: (
+            {
+                "task_id": "T-604",
+                "round": 1,
+                "head_sha": "head-ref",
+                "files_changed": [],
+                "tests": [],
+                "notes": "noop",
+            }
+            if path == orchestrator.WORK_REPORT
+            else None
+        ),
+    )
+    monkeypatch.setattr(orchestrator, "_is_git_repo_root", lambda _path: True)
+    monkeypatch.setattr(
+        orchestrator,
+        "_resolve_commit_oid",
+        lambda ref: {"base-ref": "same-oid", "head-ref": "same-oid", "same-oid": "same-oid"}[ref],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        orchestrator.cmd_run(
+            _run_config(str(task_path), allow_dirty=True),
+            single_round=True,
+            round_num=1,
+        )
+
+    assert exc.value.code == 3
+    state = json.loads(orchestrator.STATE_FILE.read_text(encoding="utf-8"))
+    assert state["outcome"] == "validation_failure"
+
+
+def test_single_round_no_change_doc_mixed_tests_still_fails(tmp_path: Path, monkeypatch) -> None:
+    # Negative: doc format, one pass + one fail → mixed is not evidence.
+    _configure_loop_paths(monkeypatch, tmp_path)
+
+    task_path = tmp_path / "task_input.json"
+    task_path.write_text(
+        json.dumps(
+            {"task_id": "T-604", "goal": "doc mixed tests", "output_format": "doc"},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    orchestrator.STATE_FILE.write_text(
+        json.dumps(_noop_state_payload(round_num=1), ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_wait_for_file",
+        lambda path, description, **kwargs: (
+            {
+                "task_id": "T-604",
+                "round": 1,
+                "head_sha": "head-ref",
+                "files_changed": [],
+                "tests": [
+                    {"name": "ok-1", "output": "1 passed", "result": "pass"},
+                    {"name": "bad-1", "output": "1 failed", "result": "fail"},
+                ],
+                "notes": "noop",
+            }
+            if path == orchestrator.WORK_REPORT
+            else None
+        ),
+    )
+    monkeypatch.setattr(orchestrator, "_is_git_repo_root", lambda _path: True)
+    monkeypatch.setattr(
+        orchestrator,
+        "_resolve_commit_oid",
+        lambda ref: {"base-ref": "same-oid", "head-ref": "same-oid", "same-oid": "same-oid"}[ref],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        orchestrator.cmd_run(
+            _run_config(str(task_path), allow_dirty=True),
+            single_round=True,
+            round_num=1,
+        )
+
+    assert exc.value.code == 3
+    state = json.loads(orchestrator.STATE_FILE.read_text(encoding="utf-8"))
+    assert state["outcome"] == "validation_failure"
+
+
+def test_single_round_no_change_doc_bare_pass_without_anchors_still_fails(tmp_path: Path, monkeypatch) -> None:
+    # Negative: {"result": "pass"} without name/output anchors is NOT evidence
+    # (Red-Team F-1: no readback anchor, no self-certification).
+    _configure_loop_paths(monkeypatch, tmp_path)
+
+    task_path = tmp_path / "task_input.json"
+    task_path.write_text(
+        json.dumps(
+            {"task_id": "T-604", "goal": "doc bare pass", "output_format": "doc"},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    orchestrator.STATE_FILE.write_text(
+        json.dumps(_noop_state_payload(round_num=1), ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_wait_for_file",
+        lambda path, description, **kwargs: (
+            {
+                "task_id": "T-604",
+                "round": 1,
+                "head_sha": "head-ref",
+                "files_changed": [],
+                "tests": [{"result": "pass"}],
+                "notes": "noop",
+            }
+            if path == orchestrator.WORK_REPORT
+            else None
+        ),
+    )
+    monkeypatch.setattr(orchestrator, "_is_git_repo_root", lambda _path: True)
+    monkeypatch.setattr(
+        orchestrator,
+        "_resolve_commit_oid",
+        lambda ref: {"base-ref": "same-oid", "head-ref": "same-oid", "same-oid": "same-oid"}[ref],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        orchestrator.cmd_run(
+            _run_config(str(task_path), allow_dirty=True),
+            single_round=True,
+            round_num=1,
+        )
+
+    assert exc.value.code == 3
+    state = json.loads(orchestrator.STATE_FILE.read_text(encoding="utf-8"))
+    assert state["outcome"] == "validation_failure"
+
+
+def test_single_round_no_change_code_tests_passing_still_fails(tmp_path: Path, monkeypatch) -> None:
+    # Negative: code-format task (default) with fully-passing tests →
+    # doc-only gate does not apply, still fails.
+    _configure_loop_paths(monkeypatch, tmp_path)
+
+    task_path = tmp_path / "task_input.json"
+    task_path.write_text(
+        json.dumps({"task_id": "T-604", "goal": "code tests passing"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    orchestrator.STATE_FILE.write_text(
+        json.dumps(_noop_state_payload(round_num=1), ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_wait_for_file",
+        lambda path, description, **kwargs: (
+            {
+                "task_id": "T-604",
+                "round": 1,
+                "head_sha": "head-ref",
+                "files_changed": [],
+                "tests": [
+                    {"name": "t-1", "output": "all passed", "result": "pass"},
+                ],
+                "notes": "noop",
+            }
+            if path == orchestrator.WORK_REPORT
+            else None
+        ),
+    )
+    monkeypatch.setattr(orchestrator, "_is_git_repo_root", lambda _path: True)
+    monkeypatch.setattr(
+        orchestrator,
+        "_resolve_commit_oid",
+        lambda ref: {"base-ref": "same-oid", "head-ref": "same-oid", "same-oid": "same-oid"}[ref],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        orchestrator.cmd_run(
+            _run_config(str(task_path), allow_dirty=True),
+            single_round=True,
+            round_num=1,
+        )
+
+    assert exc.value.code == 3
+    state = json.loads(orchestrator.STATE_FILE.read_text(encoding="utf-8"))
+    assert state["outcome"] == "validation_failure"
+
+
 def test_single_round_no_change_missing_output_files_ignored_with_warning(tmp_path: Path, monkeypatch, capsys) -> None:
     # Use case C: declared-but-missing output_files are ignored with a warning;
     # no crash and no false success.
