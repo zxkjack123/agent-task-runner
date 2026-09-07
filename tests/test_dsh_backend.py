@@ -664,3 +664,77 @@ def test_dsh_fallback_non_harness_error_no_fallback(monkeypatch: pytest.MonkeyPa
     assert "dsh-sdk error: RuntimeError" in stderr
     assert "all channels failed" not in stderr
     assert len(FakeHarness.instances) == 1  # no fallback attempted
+
+
+# ── provider fallback chain: business-failure semantics (PM #3379 T2.1) ───
+
+
+def test_dsh_fallback_business_failure_no_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Business failure (finish_reason="error") is a normal return, not a
+    # fault-class error → no fallback even with a multi-channel chain.
+    biz_fail = FakeRunResult("sess-biz", "", "error", [], [])
+    _install_channel_factory(
+        monkeypatch,
+        fault_urls=set(),
+        results={"https://api.deepseek.com/v1": biz_fail},
+    )
+    monkeypatch.setattr(orchestrator, "_log", lambda msg: None)
+    monkeypatch.setenv("LOOP_DSH_PROVIDER_CHAIN", "deepseek,360ai")
+
+    _stdout, _stderr, returncode, timed_out, session_id = orchestrator._run_dsh_sdk_dispatch(
+        "hi",
+        role="worker",
+        timeout_sec=30,
+        resume_session_id=None,
+        summary_callback=None,
+        actual_cwd=Path("/tmp"),
+    )
+
+    assert returncode == 1
+    assert timed_out is False
+    assert session_id == "sess-biz"
+    assert len(FakeHarness.instances) == 1  # no fallback attempted
+
+
+def test_dsh_fallback_usage_callback_once_for_winner(monkeypatch: pytest.MonkeyPatch) -> None:
+    second = FakeRunResult(
+        "sess-360",
+        "OK360",
+        "completed",
+        [
+            {
+                "type": "assistant/chunk",
+                "data": {
+                    "chunk": {
+                        "type": "usage",
+                        "usage": {"inputTokens": 100, "outputTokens": 50, "totalTokens": 150},
+                    }
+                },
+            }
+        ],
+        [],
+    )
+    _install_channel_factory(
+        monkeypatch,
+        fault_urls={"https://api.deepseek.com/v1"},
+        results={"https://api.360.cn/v1": second},
+    )
+    monkeypatch.setattr(orchestrator, "_log", lambda msg: None)
+    monkeypatch.setenv("LOOP_DSH_PROVIDER_CHAIN", "deepseek,360ai")
+    received: list[dict] = []
+
+    stdout, _stderr, returncode, _timed_out, session_id = orchestrator._run_dsh_sdk_dispatch(
+        "hi",
+        role="worker",
+        timeout_sec=30,
+        resume_session_id=None,
+        summary_callback=None,
+        actual_cwd=Path("/tmp"),
+        usage_callback=received.append,
+    )
+
+    assert stdout == "OK360"
+    assert returncode == 0
+    assert session_id == "sess-360"
+    # usage callback fired exactly once, from the winning (2nd) channel.
+    assert received == [{"input_tokens": 100, "output_tokens": 50, "total_tokens": 150}]

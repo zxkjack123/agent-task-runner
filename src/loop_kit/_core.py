@@ -2992,9 +2992,15 @@ def _run_dsh_sdk_dispatch(
     """In-process dsh dispatch via the DeepSeek Harness Python SDK.
 
     Lazy import keeps CI green without the SDK installed (D3); a missing SDK
-    fails loud with returncode 1. Adapted to SDK 0.1.2rc1 API: config is a
-    DeepSeekHarnessConfig dataclass, dsh_home is mandatory, and the session
-    root is injected via the DSH_SESSION_ROOT env var (no session_root param).
+    fails loud with returncode 1. Adapted to SDK 0.1.2rc1 API: dsh_home is
+    mandatory and the session root is injected via the DSH_SESSION_ROOT env
+    var (no session_root param). Multi-channel fallback (PM #3379): the
+    channel chain comes from LOOP_DSH_PROVIDER_CHAIN (default ``deepseek``);
+    a fault-class HarnessError (connection/auth/transport) closes the current
+    harness and falls back to the next channel, while business failures
+    (finish_reason != "completed") are a normal return and never fall back.
+    usage_callback and summary_callback fire exactly once, for the winning
+    channel only.
     """
     try:
         from deepseek_harness import DeepSeekHarness
@@ -3112,6 +3118,9 @@ def _run_dsh_sdk_dispatch(
     stdout_text = result.final_response or ""
     finish_reason = result.finish_reason
     returncode = 0 if finish_reason == "completed" else 1
+    # PM #3379 T2.1: this block only runs for the winning channel — the
+    # fallback loop returns the first successful result, faulted channels
+    # never reach here. usage/summary callbacks fire exactly once.
     if usage_callback is not None:
         usage_payload = _extract_dsh_usage_payload(result.events)
         if usage_payload:
