@@ -37,6 +37,15 @@ Execute the contract below and only finish after writing {review_report_path}.
   5. 只读核对：git -C <workspace> log --oneline -3 中仅允许报告文件提交
      （git show --stat 核对），文档文件未被修改；
   6. B 类非空时 pm_notify 已发（work_report.notes 或任务 notes 中有记录）。
+  7. 【语义强度变化】报告 A 类中的 CAN-001（及任何弱化词/模板化替换）条目，
+     逐一核对「修复建议」是否把命题的断言强度抬高（weak → strong）。
+     若出现把 hedge 替换为强断言（例："can be attributed with 90%" ✗→
+     "accounts for 90%"、"may indicate" ✗→ "demonstrates"），
+     该条必须降级为 B 类；报告将此类条目留在 A 类 → decision=changes_required，
+     blocking_issues 注明"语义强度变化：<行号> <原→改>"。
+  8. 【protected 越界】报告 A 类中不得含落在 protected region（LaTeX math /
+     代码块 fence / HTML 注释 / 引用块）内的条目；若发现 → 该条应标不可修，
+     违规即 decision=changes_required。
   全部满足 → decision=approve；任一不满足 → decision=changes_required，
   blocking_issues 逐条列出（含证据：文件路径/行号/缺失项）。
 

@@ -63,6 +63,14 @@ Execute the contract below and only finish after writing {work_report_path}.
 
 【Step 4】汇总 + 分级（分级表见下）：
   - 逐 finding 标记 A/B；分级表未列出的规则 ID → B（保守默认）。
+  - 【protected-region 感知（分级前置）】逐 finding 先判是否落在 protected region：
+    LaTeX math（$$..$$ / \(..\) / \begin{equation}..\end{equation} 等 equation 环境）、
+    代码块 fence（```..``` / ~~~..~~~）、HTML 注释（<!-- .. -->）、URL（\url{{}}/http 链接）。
+    命中者一律标为不可修、**不进入 A 类**（可为 B 类或单列 protected 备注），
+    即使其规则 ID 在 A 类表中（如 EMD-001/CAN-001 出现在受保护数学式内）。
+  - 【全跳过哨兵】若 A 类清单中所有条目均位于 protected region（无可自动修复项）→
+    分级结果 A 类为空，按 Step 5「A 类为空」分支处理（不建 doc-fix 子任务）；
+    报告 B 类清单中注明"全部 A 类项位于 protected region"。
   - 写报告 <workspace_path>/.github/reports/doc-pipeline-T{task_id}-<yyyymmdd>.md
     （yyyymmdd=当天 UTC 日期；目录不存在则创建）。
     报告列头（EC-7 固定）：规则ID | A/B | 位置(文件:行) | 证据 | 建议修复 | severity
@@ -107,6 +115,24 @@ B 类（语义判断 → 人工处置 + 飞书通知；**未列出的规则 ID �
   plausibility_check（PL-）、contradiction_scan、provenance 引用真实性存疑、术语 unrecognized、
   statistical_audit（判断型）、WV-001、FM-003/FM-004/FM-006、
   CI-002/CI-003/CI-004/CI-005、FT-001/FT-002/FT-006/FT-007/FT-012/FT-013、ST-002。
+
+====================================================================
+CAN-001 断言强度边界（机械替换的语义红线）
+====================================================================
+A 类 CAN-001（弱化词模板化替换）只允许「消除不必要的 hedge」，
+**严禁**在替换中把论证强度悄悄抬高（weak → strong）。机械替换不得改变
+作者对结论的置信程度。
+  反例（禁止）：
+    "can be attributed with 90% confidence"  ✗→  "accounts for 90%"
+    "may indicate"                            ✗→  "demonstrates"
+    "is consistent with"                      ✗→  "proves"
+    "suggests a possible link"                ✗→  "establishes a link"
+  正例（允许，仅去掉冗余 hedge、保留强度）：
+    "it could possibly be argued that X"      ✓→  "X"
+    "it is worth noting that X"               ✓→  "X"
+  判定规则：替换后若命题的置信度/断言强度**高于**原文 → 该条不得作为
+  CAN-001 机械修复，降级为 B 类（人工处置），并在报告中注明"语义强度变化风险"。
+  受保护区域内出现的 CAN-001（数学式/代码块内）按 protected-region 规则跳过。
 
 ====================================================================
 工具白名单（只准调用这些；其余一律不调）
