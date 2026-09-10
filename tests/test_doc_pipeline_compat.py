@@ -131,3 +131,32 @@ def test_f_all_doc_templates_render_with_loop_kit_context():
         assert p.exists(), f"missing template {name}"
         out = _core._render_prompt_template(template_path=p, context=ctx)
         assert "T-1" in out  # placeholders resolved
+
+
+# ── PM #3445: mirror byte-consistency with project_management source templates ──
+
+_PM_SRC = Path("/home/gw/opt/project_management/data/loop_templates/templates")
+_ATR_MIRROR = Path(__file__).resolve().parents[1] / ".loop" / "templates"
+
+_MIRROR_PAIRS = [
+    "doc_pipeline_worker_prompt.txt",
+    "doc_pipeline_reviewer_prompt.txt",
+]
+
+
+@pytest.mark.parametrize("fname", _MIRROR_PAIRS)
+def test_mirror_is_byte_identical_to_pm_source(fname: str) -> None:
+    """ATR `.loop/templates/<f>` must be byte-identical to the PM source template.
+
+    PM #2622 mirror contract: project_management is the source of truth; the ATR
+    copy is a checked-in snapshot that must track it exactly (rules live in the
+    PM source, not here — PM #3445 scope is mirror-only).
+    """
+    src = _PM_SRC / fname
+    mirror = _ATR_MIRROR / fname
+    assert src.exists(), f"PM source template missing: {src} (set up project_management checkout)"
+    assert mirror.exists(), f"ATR mirror missing: {mirror}"
+    assert mirror.read_bytes() == src.read_bytes(), (
+        f"{fname} drifted from PM source — re-sync with: "
+        f"cp {src} {mirror}"
+    )

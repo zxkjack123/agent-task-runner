@@ -64,7 +64,7 @@ Execute the contract below and only finish after writing {work_report_path}.
 【Step 4】汇总 + 分级（分级表见下）：
   - 逐 finding 标记 A/B；分级表未列出的规则 ID → B（保守默认）。
   - 【protected-region 感知（分级前置）】逐 finding 先判是否落在 protected region：
-    LaTeX math（$$..$$ / \(..\) / \begin{equation}..\end{equation} 等 equation 环境）、
+    LaTeX math（$$..$$ / \(..\) / equation 环境）、
     代码块 fence（```..``` / ~~~..~~~）、HTML 注释（<!-- .. -->）、URL（\url{{}}/http 链接）。
     命中者一律标为不可修、**不进入 A 类**（可为 B 类或单列 protected 备注），
     即使其规则 ID 在 A 类表中（如 EMD-001/CAN-001 出现在受保护数学式内）。
