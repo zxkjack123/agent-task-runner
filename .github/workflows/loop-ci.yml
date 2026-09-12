@@ -86,3 +86,36 @@ jobs:
             pytest-results.xml
             pytest-integration-results.xml
           if-no-files-found: warn
+
+  # 跨平台 / 多 Python 版本兼容门禁（借鉴上游 ci.yml matrix，2026-09-12 补强）
+  # 覆盖此前 CI 的两类盲区：
+  #   1) Windows 代码路径（_core.py `os.name=="nt"` / msvcrt 文件锁）—— 上游曾测 windows-latest，fork 消失
+  #   2) requires-python 声明范围（>=3.11）中的 3.12 / 3.13
+  # 与主作业 `ci` 分离：主作业保留完整质量链（coverage/ruff/mypy），本作业只做「装依赖 + 跑测试」以控制耗时。
+  compat:
+    name: compat (${{ matrix.os }} · py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, python-version: "3.11" }
+          - { os: ubuntu-latest, python-version: "3.12" }
+          - { os: ubuntu-latest, python-version: "3.13" }
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        run: uv sync --frozen --group dev
+
+      - name: Run tests (exclude e2e)
+        run: uv run --group dev pytest -m "not e2e"
