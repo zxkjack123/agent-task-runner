@@ -1,10 +1,18 @@
 # Changelog
 
-## [Unreleased] — PM #2622
+## v0.8.0 (2026-09-12)
 
 ### Added
 - **doc-pipeline & doc-fix prompt templates**（`c6d6e39`/`7b8ff54`/`9b51310`/`d24546c`/`6f1a16f`/`9325f79`）: `.loop/templates/` 双轨镜像 4 个专用模板对（doc_pipeline/doc_fix worker+reviewer，与 project_management `data/loop_templates/templates/` 逐字节一致）；模板 render 回归测试 `tests/test_doc_pipeline_compat.py`（含 loop_kit 兼容性核查：work_report.json 终态保留 / 未知 outcome → resume_failure / max_rounds_exhausted）
 - **兼容性约定**: doc_pipeline/doc_fix 循环由 bridge 侧 `--worker-noop-as-success` 驱动（哨兵终态合法零变更）；PRECONDITION-FAILED 哨兵由 PM 侧 M5 消费
+
+- **镜像一致性守护（PM #3445）**: 新增 `test_mirror_is_byte_identical_to_pm_source`（参数化 worker+reviewer，`.loop/templates/` ↔ project_management `data/loop_templates/templates/` 逐字节比对，fail-closed）；修复 `\begin{equation}` 被 loop_kit 渲染占位符误判。
+
+### Fixed
+- **doc 格式 no-change 证据门控（PM #3409）**: 新增 `_DOC_EVIDENCE_OUTPUT_FORMATS` 常量与 `_resolve_work_tests_evidence`（fail-closed 回读证据），接入 noop gating 链并透传 `task_card`；doc 系交付任务（`output_format ∈ doc/report/slides/analysis/summary`）零变更时，仅当 work_report 回读测试证据命中（`source=work_tests`）才判 `no_change_success`，否则维持 rc=3。PM 桥侧同步修复 `_detect_artifact_evidence` 的「派发前既有 dirty」误归因（baseline 差集 + int/`T-` task_id 对称规范化）。M1/M2 实机验证通过（no_change_success + work_tests 证据链 / 产物证据仅含 worker 产物）。
+
+### Changed
+- **PM 侧 doc-pipeline 分级源跨调同步（PM #3444/#3445）**: ATR 侧镜像 PM 源 `protected-region 感知分级 + CAN-001 语义强度边界 + reviewer 语义强度变化审查项`（`a4f28a6`）；跨调验收 ATR→PM 与 PM→ATR 双向 PASS（运行时播种 worker/reviewer 模板 sha256 双向全等）。
 
 ## PM #2911 — No-Change Evidence Gating (2026-08-20)
 

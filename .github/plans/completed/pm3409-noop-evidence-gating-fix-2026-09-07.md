@@ -158,6 +158,8 @@ phases:
 
 # PM #3409 — ATR 桥 no-op evidence gating 对 PM-DB-only 交付物误判修复
 
+**Status**: COMPLETED (4/4 tasks) — M1/M2 实机验证通过（2026-09-12）
+
 ## 背景与目标
 
 - **问题/需求描述**：PM #3123（FORMATFORGE 项目任务，交付物为 PM DB 记录 important_info id=440，非 repo 文件）经 ATR 桥执行：worker 实际成功（work_report.tests 8/8 回读验收 PASS），但 loop_kit 因 head_sha==base_sha 且无外部/历史证据 → `_single_round_handle_worker_noop` 判 validation_failure rc=3 误判失败；PM 桥随后在失败证据采集时把工作树既有 dirty 文件全量写入「产物证据」块，双重误归因。#3123 notes 数据面已人工修正，本计划只修代码缺陷。
