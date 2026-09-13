@@ -16577,7 +16577,15 @@ class TestRepoLockPidRecord:
             # Corrupt the pid line AFTER acquisition (a successful acquire
             # overwrites the record): the conflicting reader then sees garbage
             # and must degrade to the generic message without raising.
-            lock_path.write_text("not-a-pid\n", encoding="utf-8")
+            # Write through the lock's OWN handle: on Windows the mandatory
+            # byte-range lock denies every other handle, so a plain
+            # lock_path.write_text(...) raises PermissionError here.
+            holder_handle = lock2._handle
+            assert holder_handle is not None
+            holder_handle.seek(0)
+            holder_handle.truncate(0)
+            holder_handle.write(b"not-a-pid\n")
+            holder_handle.flush()
             with pytest.raises(RuntimeError) as exc:
                 orchestrator._acquire_repo_lock()
             msg = str(exc.value)
