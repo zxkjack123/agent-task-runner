@@ -16487,8 +16487,14 @@ class TestAcquireRepoLock:
         lock = orchestrator._acquire_repo_lock()
         assert isinstance(lock, orchestrator._LoopLock)
         lock_path = orchestrator._repo_lock_path()
-        assert lock_path.read_text(encoding="utf-8") == f"pid:{os.getpid()}\n"
+        if os.name != "nt":
+            # POSIX flock is advisory, so the pid record stays readable while
+            # held. Windows locks are mandatory: a held byte-range lock denies
+            # reads to other handles, so the record is asserted after release
+            # below instead (genuine platform difference, not a regression).
+            assert lock_path.read_text(encoding="utf-8") == f"pid:{os.getpid()}\n"
         lock.release()
+        assert lock_path.read_text(encoding="utf-8") == f"pid:{os.getpid()}\n"
         # Re-acquisition after release must succeed (flock released on close).
         lock2 = orchestrator._acquire_repo_lock()
         lock2.release()
@@ -16540,7 +16546,10 @@ class TestRepoLockPidRecord:
         lock = orchestrator._acquire_repo_lock()
         lock_path = orchestrator._repo_lock_path()
         try:
-            assert lock_path.read_text(encoding="utf-8") == f"pid:{os.getpid()}\n"
+            if os.name != "nt":
+                # Windows mandatory lock denies reads while held — see the
+                # platform note in TestAcquireRepoLock::test_acquire_and_release.
+                assert lock_path.read_text(encoding="utf-8") == f"pid:{os.getpid()}\n"
             caught: list[str] = []
 
             def _try_acquire() -> None:
@@ -16562,6 +16571,7 @@ class TestRepoLockPidRecord:
             assert "held by pid" not in msg
         finally:
             lock.release()
+        assert lock_path.read_text(encoding="utf-8") == f"pid:{os.getpid()}\n"
         lock2 = orchestrator._acquire_repo_lock()
         try:
             # Corrupt the pid line AFTER acquisition (a successful acquire

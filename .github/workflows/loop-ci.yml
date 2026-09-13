@@ -123,7 +123,4 @@ jobs:
         run: uv sync --frozen --group dev
 
       - name: Run tests (exclude e2e)
-        # -v is DIAGNOSTIC (temporary): names each test so a Windows hang is
-        # attributable from the last-started line. Revert to quiet once the
-        # hanging test is identified/fixed.
-        run: uv run --group dev pytest -m "not e2e" -v
+        run: uv run --group dev pytest -m "not e2e"

@@ -1379,19 +1379,15 @@ def _execute_verification_check(verification: VerificationSpec) -> VerificationR
         }
 
 
-# Windows byte-range locks (msvcrt.locking) make the locked bytes unreadable to
-# *every other handle*, unlike POSIX flock which is purely advisory. Locking at
-# offset 0 would therefore make the `pid:` record written there unreadable while
-# held, breaking both the lock diagnostics and any reader inspecting the lock
-# file. Lock a single byte well past the pid text instead: the record (bytes
-# 0..~20) stays readable, the same byte is used for lock/unlock, and Windows
-# permits locking a range beyond EOF.
-_NT_LOCK_OFFSET = 1 << 20  # 1 MiB
-
-
+# Windows note: msvcrt byte-range locks are MANDATORY — the locked bytes become
+# unreadable to every other handle, unlike POSIX flock which is purely advisory.
+# Lock byte 0 (inside EOF, so two processes genuinely conflict on it). The cost
+# is that on Windows the `pid:` record is not readable while the lock is held,
+# so `_repo_lock_diagnostic` degrades to "holder unknown" there. Do NOT relocate
+# the lock past EOF to dodge that: an off-EOF range does not reliably serialise
+# two processes (observed: a conflicting `loop run` proceeded as if unlocked).
 def _lock_file(handle) -> None:
     if os.name == "nt":
-        handle.seek(_NT_LOCK_OFFSET)
         msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
     else:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -1399,7 +1395,6 @@ def _lock_file(handle) -> None:
 
 def _unlock_file(handle) -> None:
     if os.name == "nt":
-        handle.seek(_NT_LOCK_OFFSET)
         msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
     else:
         fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
