@@ -1421,14 +1421,47 @@ class _LoopLock:
                 handle.flush()
             handle.seek(0)
         except OSError as e:
-            handle.close()
+            # close() may itself fail with OSError (it flushes buffered data
+            # that targets the mandatory-locked byte on Windows). Letting that
+            # escape would MASK this RuntimeError and downgrade a lock conflict
+            # into a generic "repo lock unavailable" report.
+            with contextlib.suppress(OSError):
+                handle.close()
             raise RuntimeError(f"another orchestrator instance is already running ({self.path})") from e
         try:
             _lock_file(handle)
             self._handle = handle
         except OSError as e:
-            handle.close()
+            with contextlib.suppress(OSError):
+                handle.close()  # must not mask the conflict RuntimeError (see above)
             raise RuntimeError(f"another orchestrator instance is already running ({self.path})") from e
+
+    def write_pid_record(self) -> None:
+        """Best-effort (re)write of the ``pid:`` record for diagnostics.
+
+        Must go through the lock-holding handle: on Windows the mandatory
+        byte-range lock denies access to *any other handle*, so the previous
+        ``lock_path.write_text(...)`` opened with mode "w" truncated the file
+        and then failed, leaving the record EMPTY. Same-handle access to our
+        own locked range is allowed. No-op when the record already matches.
+        """
+        handle = self._handle
+        if handle is None:
+            return
+        record = f"pid:{os.getpid()}\n"
+        try:
+            handle.seek(0)
+            if handle.read().decode("utf-8", errors="replace") == record:
+                return
+        except OSError:
+            return
+        try:
+            handle.seek(0)
+            handle.truncate(0)
+            handle.write(record.encode())
+            handle.flush()
+        except OSError:
+            pass  # diagnostics only; never gate locking on the record
 
     def release(self) -> None:
         handle = self._handle
@@ -1553,8 +1586,7 @@ def _acquire_repo_lock(paths: LoopPaths | None = None) -> _LoopLock:
         raise RuntimeError(f"another loop run is already using this working tree ({holder}) (lock: {lock_path})") from e
     except OSError as e:
         raise RuntimeError(f"repo lock unavailable ({lock_path}): {e}") from e
-    with contextlib.suppress(OSError):
-        lock_path.write_text(f"pid:{os.getpid()}\n", encoding="utf-8")
+    lock.write_pid_record()
     return lock
 
 
