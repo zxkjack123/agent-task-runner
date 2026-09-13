@@ -196,8 +196,11 @@ def _grandchild_pipe_holder_script(exit_code: int) -> str:
 def _kill_pidfile_process(pidfile: Path) -> None:
     with contextlib.suppress(FileNotFoundError, ValueError):
         pid = int(pidfile.read_text(encoding="utf-8"))
-        with contextlib.suppress(ProcessLookupError):
-            os.kill(pid, signal.SIGKILL)
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            # Windows has no SIGKILL; os.kill only accepts the signals it
+            # implements there (SIGTERM terminates). The grandchild is a
+            # throwaway sleeper, so either signal is adequate cleanup.
+            os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
 
 
 def test_collect_streamed_process_output_returns_when_grandchild_holds_pipe(tmp_path: Path) -> None:
@@ -12239,7 +12242,7 @@ class TestBuildTaskPacket:
 
         packet = orchestrator._build_task_packet(task_card, 1)
 
-        assert str(outside) in packet["target_files"]
+        assert outside.as_posix() in packet["target_files"]
 
     def test_absolute_path_readonly_rejected(self, tmp_path: Path, monkeypatch) -> None:
         _configure_loop_paths(monkeypatch, tmp_path)

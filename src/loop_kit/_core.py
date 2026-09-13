@@ -1320,6 +1320,17 @@ def _execute_verification_check(verification: VerificationSpec) -> VerificationR
 
     try:
         cmd_list = shlex.split(cmd, posix=(os.name != "nt"))
+        if os.name == "nt":
+            # shlex(posix=False) keeps surrounding quotes inside the token,
+            # unlike the Windows CRT which strips them when the child parses its
+            # command line. Without this, `python -c "print(42)"` would reach
+            # Python as the *string literal* '"print(42)"'. Strip matching outer
+            # quotes per token; subprocess.list2cmdline re-quotes as needed, so
+            # `"C:\Program Files\py.exe"` still normalises to a usable path.
+            cmd_list = [
+                t[1:-1] if len(t) >= 2 and t[0] == t[-1] and t[0] in ("'", '"') else t
+                for t in cmd_list
+            ]
     except ValueError:
         return {
             "passed": False,
@@ -1368,8 +1379,19 @@ def _execute_verification_check(verification: VerificationSpec) -> VerificationR
         }
 
 
+# Windows byte-range locks (msvcrt.locking) make the locked bytes unreadable to
+# *every other handle*, unlike POSIX flock which is purely advisory. Locking at
+# offset 0 would therefore make the `pid:` record written there unreadable while
+# held, breaking both the lock diagnostics and any reader inspecting the lock
+# file. Lock a single byte well past the pid text instead: the record (bytes
+# 0..~20) stays readable, the same byte is used for lock/unlock, and Windows
+# permits locking a range beyond EOF.
+_NT_LOCK_OFFSET = 1 << 20  # 1 MiB
+
+
 def _lock_file(handle) -> None:
     if os.name == "nt":
+        handle.seek(_NT_LOCK_OFFSET)
         msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
     else:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -1377,6 +1399,7 @@ def _lock_file(handle) -> None:
 
 def _unlock_file(handle) -> None:
     if os.name == "nt":
+        handle.seek(_NT_LOCK_OFFSET)
         msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
     else:
         fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
@@ -1389,7 +1412,13 @@ class _LoopLock:
 
     def acquire(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        handle = open(self.path, "a+b")  # noqa: SIM115
+        try:
+            handle = open(self.path, "a+b")  # noqa: SIM115
+        except OSError as e:
+            # Windows byte-range locks can make opening the held lock file fail
+            # with PermissionError before any lock attempt — that is a conflict
+            # (another holder), not a generic IO error.
+            raise RuntimeError(f"another orchestrator instance is already running ({self.path})") from e
         try:
             handle.seek(0, os.SEEK_END)
             if handle.tell() == 0:

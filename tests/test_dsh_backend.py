@@ -7,6 +7,7 @@ testing the ImportError path.
 
 from __future__ import annotations
 
+import os
 import sys
 import types
 from dataclasses import dataclass
@@ -205,7 +206,7 @@ def test_dsh_run_fn_env_patches_wiring(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(orchestrator, "_log", lambda msg: None)
     monkeypatch.setenv(
         "LOOP_DSH_PATCHES",
-        "/tmp/a.patch.yml:/tmp/b.patch.yml",
+        os.pathsep.join(["/tmp/a.patch.yml", "/tmp/b.patch.yml"]),
     )
 
     orchestrator._run_dsh_sdk_dispatch(
