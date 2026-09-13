@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.8.1 (2026-09-13)
+
+### Fixed
+- **Windows 跨平台缺陷修复（PM #3617）**: fork 首次启用 CI 后 `compat (windows-latest · py3.11)` leg 暴露的 10 个静默失修缺陷全部修复——
+  - **文件锁（`msvcrt` 强制锁语义）**: ① `_LoopLock.acquire()` 的 `except OSError` 处理器先调 `handle.close()`，而 close 会 flush 指向**被锁字节**的缓冲并再抛 `PermissionError`，从而**掩盖**真正的冲突 `RuntimeError`（真实锁冲突被误报为 `repo lock unavailable`）→ close 改 best-effort，冲突 RuntimeError 不再被掩盖；② `_acquire_repo_lock` 用 `lock_path.write_text()`（`"w"` 模式）刷新 pid 记录时**先截断再写失败**（Windows 强制锁拒绝一切"其他句柄"，含同进程的第二句柄）→ 记录被清空 → 改为经**持锁句柄自身**写入的新方法 `_LoopLock.write_pid_record()`（同句柄访问自持锁区在 Windows 上允许，记录已匹配则 no-op）。
+  - **管道语义（grandchild-holds-pipe）**: 3 个测试依赖 `signal.SIGKILL`（Windows 无此属性）→ 改 `getattr(signal, "SIGKILL", signal.SIGTERM)`。
+  - **路径分隔符**: `test_dsh_run_fn_env_patches_wiring` 与 `test_absolute_path_outside_repo_root_writable` 的 `\` vs `/` 断言 → 按平台归一化。
+  - **验证命令解析**: `_execute_verification_check` 在 Windows 上 `shlex.split(posix=False)` 保留外层引号，`python -c "print(42)"` 到达 Python 时变成字符串字面量 `'"print(42)"'` → 增加 Windows 分支剥离成对引号。
+- **撤销一个引入挂起的错误中间方案**: 曾把锁偏移至 1 MiB（想避开"锁内字节对其他句柄不可读"），实测**偏离 EOF 的字节锁在 Windows 上不能可靠序列化两个进程**——`test_replay_repo_lock_conflict_exits_5_fast` 中冲突子进程照常运行完整轮次，导致 `subprocess.run(timeout=60)` 挂起。该方案属锁**正确性**缺陷（而非测试问题），已撤销回字节 0。
+
+### Changed
+- **跨平台 CI 矩阵（PM #3617）**: 新增 `compat` 作业（`windows-latest · py3.11` + `ubuntu-latest · py3.12/3.13`），只做"装依赖 + 跑测试"以控制耗时；Windows leg 曾为 advisory（`continue-on-error`），**缺陷修复后已转回硬门禁**，三条 leg 均阻断主门禁。验收 run `34747312875`：conclusion=success，windows `803 passed / 4 skipped / 0 failed`，ubuntu 各 `804 passed / 3 skipped`。
+- **手动触发**: `loop-ci.yml` 增加 `workflow_dispatch`。
+- **dev 依赖**: 显式声明 `numpy`（dev group）。
+
+### Notes
+- **Windows 平台固有差异（非缺陷）**: `msvcrt` 是**强制锁**，持锁期间被锁字节对**其他句柄不可读**，故 `_repo_lock_diagnostic` 在 Windows 上持锁时降级为 `holder unknown`（仅影响诊断信息，不影响互斥正确性）；对应的两个锁测试在 Windows 上改为"释放后断言 pid 记录"，POSIX 分支仍断言"持锁可读"。若需 Windows 持锁期也可读 holder pid，需将 pid 记录迁至旁挂文件（未在本版实施）。
+
 ## v0.8.0 (2026-09-12)
 
 ### Added

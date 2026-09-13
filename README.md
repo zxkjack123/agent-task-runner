@@ -392,7 +392,9 @@ uv run --group dev pytest
 uv run python -m loop_kit init
 ```
 
-CI runs on push/PR: tests, coverage, ruff, optional mypy.
+CI runs on push/PR: tests, coverage, ruff, optional mypy — plus a cross-platform
+`compat` matrix (`windows-latest` · py3.11 and `ubuntu-latest` · py3.12/3.13), all three
+legs gating.
 
 > **Note**: `uv run --group dev pytest` excludes e2e tests by default (`addopts = -m "not e2e"`). Run the e2e smoke suite separately with `uv run --group dev pytest -m e2e` — it executes the loop inside a temporary git repo (`tmp_path`), so it never touches this repository's history.
 
