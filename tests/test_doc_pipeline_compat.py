@@ -143,8 +143,19 @@ _MIRROR_PAIRS = [
     "doc_pipeline_reviewer_prompt.txt",
 ]
 
+# PM #3445 mirror contract is only enforceable where the sibling
+# project_management checkout exists (local dev machine). A clean CI runner has
+# no such checkout -> skip instead of fail; the mirror snapshot itself is still
+# validated there by the render/role-pair tests above. When the checkout IS
+# present, the assertions below stay fail-closed (missing single file -> fail).
+_requires_pm_checkout = pytest.mark.skipif(
+    not _PM_SRC.exists(),
+    reason=f"project_management checkout not available at {_PM_SRC} (cross-repo mirror test)",
+)
+
 
 @pytest.mark.parametrize("fname", _MIRROR_PAIRS)
+@_requires_pm_checkout
 def test_mirror_is_byte_identical_to_pm_source(fname: str) -> None:
     """ATR `.loop/templates/<f>` must be byte-identical to the PM source template.
 
