@@ -1,6 +1,6 @@
 # 修复计划：PM DB Lock + ATR 安全缺陷
 
-> **状态**: 待执行  
+> **状态**: ✅ 已执行（2026-10-13 复核勘误：F1-F4 均已落地，见文末归档说明）  
 > **范围**: 2 repos — `project_management` (F1) + `agent-task-runner` (F2-F4)  
 > **修复量**: 5 个 task，跨 2 个文件约 40 行代码改动
 
@@ -230,3 +230,18 @@
 | R2.8 | LLM 可执行性 — 无歧义字段，无模糊描述 | 0 | — | 0 |
 | R3 | 风险与边缘 — 已验证现有测试兼容性、WB 模式 + timeout 机制、shlex 边缘 case | 0 | — | 0 |
 | **终止** | **T4 — 所有轮次无 issue** | | | **0** |
+
+---
+
+## 归档说明（2026-10-13 追加，#T-4397 台账卫生批次）
+
+复核确认：本计划 F1-F4 修复**均已落地**，文首原"状态: 待执行"为历史遗留错误标注，已勘误。证据（2026-10-12/13 实测 + doublecheck 复核 PASS）：
+
+- **F1** busy_timeout：`/home/gw/opt/project_management/scripts/auto_task_dispatcher.py:216`（`PRAGMA busy_timeout=15000`）
+- **F2** shell 注入修复：`src/loop_kit/_core.py:1322`（`shlex.split(cmd, posix=(os.name != "nt"))` + shell=False）— commit `922945c`
+- **F3** 原子写异常收紧 + fsync：`src/loop_kit/_core.py:5710`（`os.fsync`）— commit `1a40fe7`
+- **F4** `_LoopLock` 宽泛异常删除：commit `1a40fe7`（"tighten exception handling"）
+- 版本载体：v0.6.1 safety fixes（commits `50e7c99`/`d395942` 等）
+- M2（3 个 dispatcher tick 无 lock 错误的历史观察）：当时未回填记录，本次不重放，作为历史项关闭
+
+本计划随本批次移入 `.github/plans/completed/`。
